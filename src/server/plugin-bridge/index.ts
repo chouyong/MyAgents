@@ -32,25 +32,41 @@ import { parseArgs } from 'util';
 // Plugin compat loader — runtime patch for broken community plugins
 // =============================================================================
 // Some published OpenClaw plugins (e.g. @larksuite/openclaw-lark all versions)
-// have a build-pipeline bug: they emit CJS files (`"use strict";
-// Object.defineProperty(exports, ...); exports.X = Y`) that also reference
-// `import.meta.url` inside function bodies. Node's module classifier sees
-// `import.meta` anywhere in a .js file → forces ESM parsing → the CJS
-// `exports` global becomes undefined → ReferenceError at load.
+// have build-pipeline bugs we work around at load time. We use a sync
+// `module.registerHooks` (Node 22.15+) instead of `register()` because when a
+// CJS file calls `require(broken.js)`, Node pivots to `loadESMFromCJS` on the
+// main thread synchronously — async hooks aren't invoked on that path. Only
+// sync hooks catch it.
 //
-// Bun tolerated this silently; Node (spec-compliant) rejects it. Rather than
-// wait for every broken plugin to republish, we register a sync loader hook
-// (`module.registerHooks` — Node 22.15+) that intercepts .js files from plugin
-// node_modules trees. On detecting the CJS+import.meta mixed pattern it:
-//   1. Rewrites `fileURLToPath(import.meta.url)` → `__filename`
-//   2. Rewrites any remaining `import.meta.url` → `pathToFileURL(__filename).href`
-//   3. Forces CJS classification (`format: 'commonjs'`) so Node accepts the file
+// Patches applied (in order):
 //
-// IMPORTANT: Must use `registerHooks()` (sync), NOT `register()` (async).
-// When a CJS file calls `require(broken.js)`, Node pivots to `loadESMFromCJS`
-// synchronously on the main thread — async hooks are not invoked on that path.
-// Only sync hooks catch it.
+// 1. CJS + import.meta hybrid (every @larksuite/openclaw-lark version)
+//    Plugin emits `"use strict"; Object.defineProperty(exports, ...); exports.X = Y`
+//    AND references `import.meta.url` inside function bodies. Node's module
+//    classifier sees `import.meta` and forces ESM parsing → CJS `exports`
+//    global becomes undefined → ReferenceError at load. Bun tolerated this
+//    silently; Node (spec-compliant) rejects it.
+//      - Rewrite `fileURLToPath(import.meta.url)` → `__filename`
+//      - Rewrite remaining `import.meta.url` → `pathToFileURL(__filename).href`
+//      - Force CJS classification so Node accepts the file
+//
+// 2. Lark image/file upload `Readable.from(buffer)` (v2026.4.8 and earlier)
+//    @larksuite/openclaw-lark wraps a Buffer in `Readable.from(image)` before
+//    handing it to the Feishu SDK's `client.im.image.create()`. The SDK uses
+//    `form-data` for multipart upload, and form-data can't determine the
+//    stream length from a Readable, so the upload is sent without
+//    Content-Length and Feishu's API returns `null` ("no image_key in
+//    response"). Upstream OpenClaw fixed this by passing the Buffer directly
+//    (form-data handles Buffers fine), but the published plugin still ships
+//    the broken pattern. See:
+//      - https://github.com/larksuite/node-sdk/issues/121
+//      - openclaw/extensions/feishu/src/media.ts (upstream canonical)
 const PLUGIN_PATH_RE = /[/\\]openclaw-plugins[/\\][^/\\]+[/\\]node_modules[/\\]/;
+// Match the broken lark pattern, capturing the destination var name and the input arg name
+// so we can preserve them in the rewrite. The transform expression matches both upload sites
+// in one regex (image / file / any var). Whitespace is generous because plugins may republish
+// with prettier reformatted output.
+const LARK_BUFFER_STREAM_RE = /Buffer\.isBuffer\((\w+)\)\s*\?\s*[\w$.]+\.Readable\.from\(\1\)\s*:\s*fs\.createReadStream\(\1\)/g;
 
 registerHooks({
   load(url, context, next) {
@@ -69,13 +85,30 @@ registerHooks({
     // header comments between them can be >200 chars.
     const hasCjsExports = /^"use strict";/.test(src)
       && /\b(?:Object\.defineProperty\(exports|exports\.[\w$]+\s*=|module\.exports\s*=)/.test(src);
-    if (!hasImportMeta || !hasCjsExports) {
+    const needsCjsImportMetaPatch = hasImportMeta && hasCjsExports;
+    const needsLarkBufferPatch = LARK_BUFFER_STREAM_RE.test(src);
+    LARK_BUFFER_STREAM_RE.lastIndex = 0; // reset between calls (regex has /g flag)
+    if (!needsCjsImportMetaPatch && !needsLarkBufferPatch) {
       return next(url, context);
     }
-    const patched = src
-      .replace(/\(0,\s*[\w$.]+\.fileURLToPath\)\(import\.meta\.url\)/g, '__filename')
-      .replace(/\bfileURLToPath\(import\.meta\.url\)/g, '__filename')
-      .replace(/\bimport\.meta\.url\b/g, 'require("node:url").pathToFileURL(__filename).href');
+    let patched = src;
+    if (needsCjsImportMetaPatch) {
+      patched = patched
+        .replace(/\(0,\s*[\w$.]+\.fileURLToPath\)\(import\.meta\.url\)/g, '__filename')
+        .replace(/\bfileURLToPath\(import\.meta\.url\)/g, '__filename')
+        .replace(/\bimport\.meta\.url\b/g, 'require("node:url").pathToFileURL(__filename).href');
+    }
+    if (needsLarkBufferPatch) {
+      // `arg` is the captured input variable (image/file/buffer/etc.).
+      // The replacement matches upstream openclaw's fix: pass Buffer directly,
+      // use createReadStream only for string paths.
+      patched = patched.replace(LARK_BUFFER_STREAM_RE,
+        (_match, arg) => `(typeof ${arg} === 'string' ? fs.createReadStream(${arg}) : ${arg})`);
+    }
+    // Both patch paths target CJS files — the import.meta+CJS hybrid forces
+    // 'commonjs' to override Node's misclassification, and the lark buffer
+    // patch only matches CJS-shape `<requireBinding>.Readable.from(...)`.
+    // Returning 'commonjs' for both keeps Node's classifier consistent.
     return { format: 'commonjs', source: patched, shortCircuit: true };
   },
 });
