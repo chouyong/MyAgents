@@ -518,6 +518,35 @@ class GeminiProcess implements RuntimeProcess {
 let modelCache: { models: RuntimeModelInfo[]; timestamp: number } | null = null;
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** Build a RuntimeModelInfo[] from a Gemini ACP `session/new` (or `session/load`)
+ *  response's `models` field. Shared by `queryModelsViaAcp` and `startSession` so
+ *  the prewarm path can prime modelCache from its own session/new RPC, eliminating
+ *  the second `gemini --acp` cold-start that /api/runtime/models would otherwise
+ *  pay (see PRD perf note: scenario 2/3 of OPEN_AI_DISCUSSION + Launcher → Chat). */
+function buildModelListFromAcpResponse(modelsField: {
+  availableModels?: Array<{ modelId: string; name: string; description?: string }>;
+  currentModelId?: string;
+} | undefined): RuntimeModelInfo[] {
+  const available = modelsField?.availableModels ?? [];
+  const currentId = modelsField?.currentModelId;
+  // Only the empty "默认" entry is marked isDefault — matches CC_MODELS convention.
+  // When value='' is sent to the runtime, gemini.ts skips session/set_model and
+  // Gemini uses its own currentModelId automatically. The fact that the current
+  // model is Gemini's own default is surfaced in the description, not as
+  // isDefault=true, so the UI doesn't show two competing default markers.
+  const defaultEntry: RuntimeModelInfo = { value: '', displayName: '默认', isDefault: true };
+  const discovered: RuntimeModelInfo[] = available.map((m) => ({
+    value: m.modelId,
+    displayName: m.name || m.modelId,
+    description:
+      m.modelId === currentId
+        ? `${m.description ? m.description + ' · ' : ''}Gemini CLI 内置默认`
+        : m.description,
+    isDefault: false,
+  }));
+  return [defaultEntry, ...discovered];
+}
+
 // ─── Permission mode helpers ───
 
 function mapPermissionMode(mode: string): string {
@@ -549,6 +578,13 @@ function pickDefaultMode(scenarioType: string): string {
 export class GeminiRuntime implements AgentRuntime {
   readonly type: RuntimeType = 'gemini';
 
+  /** In-flight session/new promise from prewarm's startSession path. queryModels
+   *  uses this to avoid spawning a duplicate `gemini --acp` when prewarm is
+   *  already paying the ~10s cold-start cost — both calls then share the same
+   *  RPC's availableModels result. Set immediately when startSession enters
+   *  session/new dispatch, cleared in finally so failures don't leak it. */
+  private currentSessionNewPromise: Promise<RuntimeModelInfo[]> | null = null;
+
   async detect(): Promise<RuntimeDetection> {
     try {
       const proc = spawn([resolveCommand('gemini'), '--version'], {
@@ -569,13 +605,28 @@ export class GeminiRuntime implements AgentRuntime {
   }
 
   async queryModels(): Promise<RuntimeModelInfo[]> {
+    // 1. Fresh cache hit
     if (modelCache && Date.now() - modelCache.timestamp < MODEL_CACHE_TTL_MS) {
       return modelCache.models;
     }
+    // 2. Prewarm's startSession is already in-flight on session/new — share its
+    //    result instead of spawning a second `gemini --acp`. This is the key
+    //    race-safe step: the GET /api/runtime/models and POST /api/runtime/prewarm
+    //    arrive nearly simultaneously when a Tab Sidecar boots, and without this
+    //    coordination both would pay independent cold-start costs (and contend
+    //    with each other for CPU/auth refresh).
+    if (this.currentSessionNewPromise) {
+      try {
+        return await this.currentSessionNewPromise;
+      } catch {
+        // Fall through to spawn-temporary fallback if the prewarm RPC died.
+      }
+    }
+    // 3. No prewarm in flight (e.g. Launcher's Global Sidecar query) — spawn
+    //    a temporary process. queryModelsViaAcp writes modelCache itself before
+    //    returning, so subsequent calls within the TTL skip this branch.
     try {
-      const models = await this.queryModelsViaAcp();
-      modelCache = { models, timestamp: Date.now() };
-      return models;
+      return await this.queryModelsViaAcp();
     } catch (err) {
       console.error('[gemini] Failed to query models:', err);
       return modelCache?.models ?? [];
@@ -622,24 +673,9 @@ export class GeminiRuntime implements AgentRuntime {
         };
       };
 
-      const available = result.models?.availableModels ?? [];
-      const currentId = result.models?.currentModelId;
-      // Only the empty "默认" entry is marked isDefault — matches CC_MODELS convention.
-      // When value='' is sent to the runtime, gemini.ts skips session/set_model and
-      // Gemini uses its own currentModelId automatically. The fact that "auto-gemini-3"
-      // is Gemini's own default is surfaced in the description, not as isDefault=true,
-      // so the UI doesn't show two competing default markers.
-      const defaultEntry: RuntimeModelInfo = { value: '', displayName: '默认', isDefault: true };
-      const discovered: RuntimeModelInfo[] = available.map((m) => ({
-        value: m.modelId,
-        displayName: m.name || m.modelId,
-        description:
-          m.modelId === currentId
-            ? `${m.description ? m.description + ' · ' : ''}Gemini CLI 内置默认`
-            : m.description,
-        isDefault: false,
-      }));
-      return [defaultEntry, ...discovered];
+      const models = buildModelListFromAcpResponse(result.models);
+      modelCache = { models, timestamp: Date.now() };
+      return models;
     } finally {
       rpc.destroy();
       try {
@@ -814,19 +850,52 @@ export class GeminiRuntime implements AgentRuntime {
       } else {
         const newParams = { cwd: options.workspacePath, mcpServers: [] };
         console.log(`[gemini] RPC session/new: ${JSON.stringify(newParams)}`);
-        const result = (await geminiProc.rpc.call('session/new', newParams, 30_000)) as {
-          sessionId: string;
-          modes?: { currentModeId?: string };
-          models?: { currentModelId?: string };
-        };
-        geminiProc.sessionId = result.sessionId;
 
-        onEvent({
-          kind: 'session_init',
-          sessionId: result.sessionId,
-          model: result.models?.currentModelId || options.model || '',
-          tools: [],
+        // Race-coordinate with queryModels: a concurrent /api/runtime/models call
+        // (Chat.tsx:691, fired in parallel with this prewarm) sees this promise
+        // and awaits it instead of spawning a duplicate gemini --acp. Without
+        // this coordination both calls pay independent ~10s cold-starts and
+        // contend for CPU/auth — total ~17s vs the ~10s we get by sharing.
+        let resolveModelsPromise!: (m: RuntimeModelInfo[]) => void;
+        let rejectModelsPromise!: (e: unknown) => void;
+        this.currentSessionNewPromise = new Promise<RuntimeModelInfo[]>((resolve, reject) => {
+          resolveModelsPromise = resolve;
+          rejectModelsPromise = reject;
         });
+        // Pre-attach a noop catch so a rejection (rpc.call throws) doesn't trip
+        // Node's unhandled-rejection warning when no concurrent queryModels is
+        // listening. queryModels still observes the rejection via its own await.
+        this.currentSessionNewPromise.catch(() => {});
+
+        try {
+          const result = (await geminiProc.rpc.call('session/new', newParams, 30_000)) as {
+            sessionId: string;
+            modes?: { currentModeId?: string };
+            models?: {
+              currentModelId?: string;
+              availableModels?: Array<{ modelId: string; name: string; description?: string }>;
+            };
+          };
+          geminiProc.sessionId = result.sessionId;
+
+          // Prime modelCache from this RPC's availableModels — skips the duplicate
+          // gemini --acp spawn that would otherwise fire from /api/runtime/models.
+          const models = buildModelListFromAcpResponse(result.models);
+          modelCache = { models, timestamp: Date.now() };
+          resolveModelsPromise(models);
+
+          onEvent({
+            kind: 'session_init',
+            sessionId: result.sessionId,
+            model: result.models?.currentModelId || options.model || '',
+            tools: [],
+          });
+        } catch (err) {
+          rejectModelsPromise(err);
+          throw err;
+        } finally {
+          this.currentSessionNewPromise = null;
+        }
       }
 
       // 10. Apply desired mode if not default.
