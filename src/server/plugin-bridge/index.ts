@@ -295,10 +295,24 @@ async function loadPlugin() {
   loadedRuntime = runtime;
 
   // CRITICAL: Patch axios BEFORE importing the plugin.
-  // @larksuiteoapi/node-sdk creates `defaultHttpInstance = axios.create()` at import time.
-  // Bun's default axios http adapter has a compatibility bug where connections are silently
-  // closed after ~30s, causing all SDK API calls to hang. Setting a 10s timeout prevents
-  // the 30s hang and lets the plugin's error handling (retry/fallback) kick in faster.
+  //
+  // @larksuiteoapi/node-sdk@1.60.0 does this at import time:
+  //   const defaultHttpInstance = axios.create({ adapter: bunFetchAdapter });
+  //
+  // The bunFetchAdapter is hand-rolled to use global `fetch` for Bun runtime
+  // compatibility. But its body serialization is broken for multipart uploads:
+  //   opts.body = typeof c.data==='string' ? c.data : JSON.stringify(c.data)
+  // — when `c.data` is a FormData object (image upload, file upload), the
+  // adapter JSON-stringifies it into "{}", so Feishu's API receives a
+  // bodyless multipart request and returns null. This surfaced as
+  // "Image upload failed: no image_key in response. Response: null".
+  //
+  // We override two things on every instance the plugin creates:
+  //   1. adapter — force back to 'http' so axios uses Node's http adapter
+  //      (handles FormData / Buffer / Stream correctly via form-data lib).
+  //   2. timeout — cap at 10s so a stuck connection fails fast and the
+  //      plugin's retry/fallback path kicks in (legacy fix for a separate
+  //      Bun adapter hang bug).
   try {
     const axiosModule = await import(`${pluginDir}/node_modules/axios`);
     const axios = axiosModule.default || axiosModule;
@@ -306,12 +320,17 @@ async function loadPlugin() {
       const origCreate = axios.create.bind(axios);
       axios.create = (...args: unknown[]) => {
         const instance = origCreate(...(args as [Record<string, unknown>]));
+        // Replace any custom adapter (e.g. bunFetchAdapter) with axios's built-in
+        // 'http' adapter. Multipart uploads need the http adapter — fetch-based
+        // shims drop FormData. The string form is supported by axios 1.x and
+        // resolves to the same adapter axios would auto-pick in Node.
+        instance.defaults.adapter = 'http';
         if (!instance.defaults.timeout || instance.defaults.timeout > 10000) {
           instance.defaults.timeout = 10000;
         }
         return instance;
       };
-      console.log('[plugin-bridge] Patched axios.create with 10s timeout for Bun compatibility');
+      console.log('[plugin-bridge] Patched axios.create — adapter=http, timeout=10s');
     }
   } catch {
     // axios not installed in plugin dir — no patch needed
