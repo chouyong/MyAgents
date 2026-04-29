@@ -33,7 +33,15 @@ interface BrowserPanelProps {
   onClose: () => void;
   /** Switch to code editor view (only available when sourceFile is set) */
   onSwitchToEditor?: () => void;
+  /**
+   * Notify parent when the visible URL changes (Rust emits `browser:url-changed`
+   * after navigation / page-load). Lets the parent keep its own UI bits — like
+   * the split-view tab label — in sync with what the user actually sees.
+   */
+  onUrlChange?: (url: string) => void;
 }
+
+const URL_PLACEHOLDER = '输入网址或搜索…';
 
 export default function BrowserPanel({
   tabId,
@@ -46,6 +54,7 @@ export default function BrowserPanel({
   onCreateFailed,
   onClose,
   onSwitchToEditor,
+  onUrlChange,
 }: BrowserPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [currentUrl, setCurrentUrl] = useState(url ?? '');
@@ -59,6 +68,25 @@ export default function BrowserPanel({
   const toast = useToast();
   const toastRef = useRef(toast);
   useEffect(() => { toastRef.current = toast; }, [toast]);
+
+  // onUrlChange via ref — same reason as toastRef. Lets the url-changed
+  // listener effect stay stable across parent re-renders.
+  const onUrlChangeRef = useRef(onUrlChange);
+  useEffect(() => { onUrlChangeRef.current = onUrlChange; }, [onUrlChange]);
+
+  // Mount-tracking ref to gate post-resolve setState in async chains, guarding
+  // the close→reopen race where an unmounted instance's create promise still
+  // resolves and would otherwise mutate parent state for the new instance's
+  // tabId. Must be declared BEFORE any effect that depends on it.
+  const isMountedRef = useRef(true);
+  useEffect(() => () => { isMountedRef.current = false; }, []);
+
+  // Whether this webview has ever navigated to a real (non-blank) URL. Once
+  // true, subsequent visits to about:blank (e.g. via browser back-button) are
+  // shown by the native webview rather than overridden by our React empty
+  // state — letting the user see the actual history page instead of the
+  // "new tab" UI on every back-press.
+  const [hasNavigated, setHasNavigated] = useState(false);
 
   // ── Editable URL bar state ──
   const [urlEditing, setUrlEditing] = useState(false);
@@ -90,13 +118,23 @@ export default function BrowserPanel({
         width: rect.width, height: rect.height,
       })
         .then(() => {
+          // Cross-instance race: this resolution may belong to an unmounted
+          // BrowserPanel whose `tabId` has been reused by a fresh instance
+          // (close → reopen). Calling cmd_browser_close here would kill the
+          // new instance's webview. The unmount-cleanup effect already handles
+          // teardown for unmounted instances; bail without touching state.
+          if (!isMountedRef.current) return;
           if (cancelled) {
-            invoke('cmd_browser_close', { tabId }).catch(() => {});
+            // Same instance, but deps changed mid-create (e.g. url updated).
+            // Sync browserAlive=true so the navigate branch on the next effect
+            // run can target the new URL via cmd_browser_navigate.
+            onBrowserCreated();
             return;
           }
           onBrowserCreated();
         })
         .catch((err) => {
+          if (!isMountedRef.current) return;
           console.error('[browser] Create failed:', err);
           if (!cancelled) {
             const msg = typeof err === 'string' ? err : (err?.message ?? String(err));
@@ -122,7 +160,16 @@ export default function BrowserPanel({
 
     (async () => {
       const u1 = await listen<string>(`browser:url-changed:${tabId}`, (event) => {
-        if (!cancelled) setCurrentUrl(event.payload);
+        if (cancelled) return;
+        const next = event.payload;
+        setCurrentUrl(next);
+        // Latch hasNavigated on first real (non-blank) URL — lets the React
+        // empty state release control over the panel for the rest of this
+        // webview's lifetime.
+        if (next && next !== 'about:blank') {
+          setHasNavigated((prev) => (prev ? prev : true));
+        }
+        onUrlChangeRef.current?.(next);
       });
       if (cancelled) { u1(); return; }
       unlisteners.push(u1);
@@ -164,10 +211,26 @@ export default function BrowserPanel({
     };
   }, [browserAlive, tabId]);
 
+  // Blank-state detection.
+  //
+  // Anchored to the `url` prop (the URL the parent asked us to load) and a
+  // one-way `hasNavigated` latch — NOT to the moving `currentUrl`. This means:
+  //   - Toolbar-opened browser (parent passes 'about:blank') → blank state
+  //     until the user types a URL and navigates away.
+  //   - User opens a chat link (parent passes 'https://…') → never blank.
+  //   - User navigates from blank → site → presses Back to about:blank →
+  //     hasNavigated stays true, so the native webview keeps control instead
+  //     of our React empty state hijacking the back button.
+  //
+  // Avoiding `currentUrl` here also sidesteps the race where create resolves
+  // a frame before the first `browser:url-changed` event arrives (an empty
+  // `currentUrl` would otherwise hide the just-alive webview).
+  const isBlankPage = url === 'about:blank' && !hasNavigated;
+
   // ── Consolidated show/hide ──
   useEffect(() => {
     if (!browserAlive) return;
-    const shouldShow = isVisible && !isDraggingSplit && !overlayDetected;
+    const shouldShow = isVisible && !isDraggingSplit && !overlayDetected && !isBlankPage;
     if (shouldShow) {
       invoke('cmd_browser_show', { tabId }).catch(() => {});
       const el = containerRef.current;
@@ -181,7 +244,7 @@ export default function BrowserPanel({
     } else {
       invoke('cmd_browser_hide', { tabId }).catch(() => {});
     }
-  }, [isVisible, isDraggingSplit, overlayDetected, browserAlive, tabId]);
+  }, [isVisible, isDraggingSplit, overlayDetected, browserAlive, isBlankPage, tabId]);
 
   // ── Cleanup on unmount ──
   useEffect(() => {
@@ -217,17 +280,21 @@ export default function BrowserPanel({
 
   // ── URL bar editing ──
   const handleUrlClick = useCallback(() => {
-    setUrlDraft(currentUrl);
+    // On blank state, start with empty draft so user can type immediately.
+    setUrlDraft(isBlankPage ? '' : currentUrl);
     setUrlEditing(true);
     // Focus will happen after render via autoFocus
-  }, [currentUrl]);
+  }, [currentUrl, isBlankPage]);
 
   const handleUrlSubmit = useCallback(() => {
     setUrlEditing(false);
     let trimmed = urlDraft.trim();
     if (!trimmed) return;
-    // Auto-add https:// if no protocol
-    if (!/^https?:\/\//i.test(trimmed)) {
+    // Add https:// only when the input has no scheme at all. Detecting any
+    // RFC-3986 scheme prefix (not just http/https) preserves `about:blank`,
+    // `file://`, `data:`, etc. unchanged. Tauri's on_navigation already blocks
+    // dangerous schemes (e.g. `javascript:`), so we don't sanitize here.
+    if (!/^[a-z][a-z0-9+\-.]*:/i.test(trimmed)) {
       trimmed = 'https://' + trimmed;
     }
     if (trimmed !== currentUrl) {
@@ -245,8 +312,8 @@ export default function BrowserPanel({
     }
   }, [handleUrlSubmit]);
 
-  // Extract display hostname
-  const displayUrl = currentUrl
+  // Extract display hostname (suppressed for blank state so we don't show "about:blank" text)
+  const displayUrl = currentUrl && !isBlankPage
     ? (() => { try { return new URL(currentUrl).hostname || currentUrl; } catch { return currentUrl; } })()
     : '';
 
@@ -284,7 +351,8 @@ export default function BrowserPanel({
           <input
             ref={urlInputRef}
             autoFocus
-            className="ml-1.5 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-0.5 text-[12px] text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+            placeholder={URL_PLACEHOLDER}
+            className="ml-1.5 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-0.5 text-[12px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
             value={urlDraft}
             onChange={(e) => setUrlDraft(e.target.value)}
             onKeyDown={handleUrlKeyDown}
@@ -295,10 +363,14 @@ export default function BrowserPanel({
           <button
             type="button"
             onClick={handleUrlClick}
-            className="ml-1.5 min-w-0 flex-1 cursor-text truncate rounded-[var(--radius-sm)] px-2 py-0.5 text-left text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
-            title={currentUrl}
+            className="ml-1.5 min-w-0 flex-1 cursor-text truncate rounded-[var(--radius-sm)] px-2 py-0.5 text-left text-[12px] transition-colors hover:bg-[var(--paper-inset)]"
+            title={isBlankPage ? URL_PLACEHOLDER : currentUrl}
           >
-            {currentUrl}
+            {isBlankPage ? (
+              <span className="text-[var(--ink-faint)]">{URL_PLACEHOLDER}</span>
+            ) : (
+              <span className="text-[var(--ink-muted)]">{currentUrl}</span>
+            )}
           </button>
         )}
 
@@ -316,7 +388,7 @@ export default function BrowserPanel({
             type="button"
             className={navBtn}
             onClick={handleOpenExternal}
-            disabled={!currentUrl}
+            disabled={!currentUrl || isBlankPage}
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </button>
@@ -339,7 +411,7 @@ export default function BrowserPanel({
 
       {/* Placeholder container — native Webview overlays this area */}
       <div ref={containerRef} className="relative min-h-0 flex-1 bg-[var(--paper)]">
-        {!browserAlive && (
+        {!browserAlive && !isBlankPage && (
           <div className="flex h-full items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-6 w-6" />
@@ -348,7 +420,42 @@ export default function BrowserPanel({
           </div>
         )}
 
-        {isDraggingSplit && browserAlive && (
+        {/* Blank state — shown when about:blank or alive-but-no-url. Click anywhere to focus URL bar. */}
+        {isBlankPage && (
+          <button
+            type="button"
+            onClick={handleUrlClick}
+            className="group absolute inset-0 flex cursor-text select-none flex-col items-center justify-center bg-[var(--paper)] text-left outline-none"
+          >
+            {/* Soft radial wash for warmth */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background:
+                  'radial-gradient(ellipse at 50% 38%, var(--accent-warm-subtle) 0%, transparent 60%)',
+              }}
+            />
+            <div className="relative flex flex-col items-center gap-4">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md">
+                <Globe
+                  className="h-7 w-7 text-[var(--accent-warm)]"
+                  strokeWidth={1.5}
+                />
+              </div>
+              <div className="flex flex-col items-center gap-1.5">
+                <div className="text-[15px] font-medium tracking-tight text-[var(--ink)]">
+                  新标签页
+                </div>
+                <div className="text-[12px] text-[var(--ink-muted)]">
+                  在上方地址栏输入网址或粘贴链接
+                </div>
+              </div>
+            </div>
+          </button>
+        )}
+
+        {isDraggingSplit && browserAlive && !isBlankPage && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-md">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-5 w-5" />

@@ -15,6 +15,7 @@ import {
   ExternalLink,
   TerminalSquare,
   Search,
+  Globe,
   PanelRightClose,
   X,
 } from "lucide-react";
@@ -165,6 +166,8 @@ interface DirectoryPanelProps {
   onOpenTerminal?: () => void;
   /** Whether an embedded terminal is currently alive (for indicator display) */
   terminalAlive?: boolean;
+  /** Open embedded browser in split panel (creates about:blank if not yet open) */
+  onOpenBrowser?: () => void;
 }
 
 type FilePreview = {
@@ -222,6 +225,7 @@ const DirectoryPanel = memo(
       onFilePreviewExternal,
       onOpenTerminal,
       terminalAlive,
+      onOpenBrowser,
     },
     ref,
   ) {
@@ -1482,7 +1486,29 @@ const DirectoryPanel = memo(
             <span className="text-base font-semibold text-[var(--ink)]">
               工作区
             </span>
-            {/* Terminal button — next to title */}
+            {/* Search toggle button */}
+            <Tip label={isSearchMode ? "关闭搜索" : "文件搜索"} position="bottom">
+              <button
+                  type="button"
+                  onClick={(e) => {
+                      e.stopPropagation();
+                      setIsSearchMode(!isSearchMode);
+                      if (!isSearchMode) {
+                          setTimeout(() => searchInputRef.current?.focus(), 50);
+                      } else {
+                          setSearchQuery('');
+                      }
+                  }}
+                  className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
+                      isSearchMode
+                          ? "bg-[var(--accent)] text-white hover:bg-[var(--accent-warm-hover)]"
+                          : "text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                  }`}
+              >
+                  <Search className="h-4 w-4" />
+              </button>
+            </Tip>
+            {/* Terminal button */}
             {onOpenTerminal && (
               <Tip
                 label={terminalAlive ? "显示终端" : "打开终端"}
@@ -1508,28 +1534,21 @@ const DirectoryPanel = memo(
                 </button>
               </Tip>
             )}
-            {/* Search toggle button — same size as Terminal */}
-            <Tip label={isSearchMode ? "关闭搜索" : "文件搜索"} position="bottom">
-              <button
+            {/* Browser button */}
+            {onOpenBrowser && (
+              <Tip label="浏览器" position="bottom">
+                <button
                   type="button"
                   onClick={(e) => {
-                      e.stopPropagation();
-                      setIsSearchMode(!isSearchMode);
-                      if (!isSearchMode) {
-                          setTimeout(() => searchInputRef.current?.focus(), 50);
-                      } else {
-                          setSearchQuery('');
-                      }
+                    e.stopPropagation();
+                    onOpenBrowser();
                   }}
-                  className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
-                      isSearchMode
-                          ? "bg-[var(--accent)] text-white hover:bg-[var(--accent-warm-hover)]"
-                          : "text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                  }`}
-              >
-                  <Search className="h-4 w-4" />
-              </button>
-            </Tip>
+                  className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                >
+                  <Globe className="h-4 w-4" />
+                </button>
+              </Tip>
+            )}
           </div>
           {/* Right side buttons */}
           <div className="flex items-center gap-1">
