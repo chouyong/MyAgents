@@ -9,16 +9,31 @@
 // (no per-block pencil, no notification pencil — one entry only, per
 // the v0.1.69 preview polish).
 //
+// v0.2.4: docs can grow long (an active progress.md log easily hits
+// kilobytes). The preview now collapses by default to a "more than
+// half a screen" peek (`COLLAPSED_MAX_PX`) with a fade-out gradient
+// and a "展开全部 / 收起" toggle. Short docs that already fit inside
+// the cap keep the toggle hidden (we measure `scrollHeight` after
+// render and only show the affordance when it's actually needed).
+//
 // `progress.md` callers set `hideWhenEmpty` so the block vanishes on
 // new tasks that have no execution log yet.
 
-import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronDown, ChevronUp, FolderOpen } from 'lucide-react';
 
 import Markdown from '@/components/Markdown';
 import { taskOpenDocsDir, taskReadDoc, type TaskDocName } from '@/api/taskCenter';
 import type { Task } from '@/../shared/types/task';
 import { extractErrorMessage } from './errors';
+
+/** Collapsed preview height. ~"more than half a screen" on a typical
+ *  laptop viewport, generous enough that short docs don't get clipped. */
+const COLLAPSED_MAX_PX = 280;
+/** Slack we add before declaring content "actually needs the toggle".
+ *  Without this, content that just barely overflows would render the
+ *  fade + button while showing all of it — confusing. */
+const OVERFLOW_SLACK_PX = 24;
 
 interface Props {
   task: Task;
@@ -54,6 +69,16 @@ export function TaskDocBlock({
   const loadKey = `${task.id}|${doc}|${String(reloadKey ?? '')}`;
   const loaded = loadedFor === loadKey;
 
+  // Collapse state:
+  //   `expanded`        — user intent (false by default)
+  //   `overflows`       — does the rendered content actually need the
+  //                       toggle? Computed via scrollHeight after render.
+  //                       New content (or reloadKey bump) resets it to
+  //                       false until the next layout pass measures.
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -62,6 +87,9 @@ export function TaskDocBlock({
         if (cancelled) return;
         setContent(body);
         setLoadedFor(loadKey);
+        // Fresh content → collapse again so jumping to a new task
+        // doesn't carry over the prior "expanded" state.
+        setExpanded(false);
       } catch (e) {
         if (cancelled) return;
         onError(extractErrorMessage(e));
@@ -72,6 +100,33 @@ export function TaskDocBlock({
       cancelled = true;
     };
   }, [task.id, doc, reloadKey, loadKey, onError]);
+
+  // After the markdown renders, measure whether it overflows the cap.
+  // We defer to rAF so the setState fires from an async callback rather
+  // than the effect body (lint: react-hooks/set-state-in-effect). Also
+  // attaches a ResizeObserver to re-measure when the surrounding modal
+  // resizes — Markdown content reflowed by viewport width can flip
+  // between "fits" and "overflows".
+  useEffect(() => {
+    if (!loaded) return;
+    const el = contentRef.current;
+    if (!el) return;
+    let raf = 0;
+    const measure = () => {
+      const fits = el.scrollHeight <= COLLAPSED_MAX_PX + OVERFLOW_SLACK_PX;
+      setOverflows(!fits);
+    };
+    raf = requestAnimationFrame(measure);
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    });
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [loaded, content]);
 
   // The on-disk path is deterministic (`~/.myagents/tasks/<id>/<doc>.md`)
   // so we can surface it + an opener button right below the title —
@@ -88,6 +143,9 @@ export function TaskDocBlock({
   // nothing; an unloaded one renders the loading placeholder so users
   // see the block during initial fetch (prevents jumpy layout).
   if (hideWhenEmpty && loaded && !content) return null;
+
+  const showCollapseAffordance = loaded && !!content && overflows;
+  const showFade = showCollapseAffordance && !expanded;
 
   return (
     <section className="mt-4">
@@ -118,13 +176,55 @@ export function TaskDocBlock({
           加载中…
         </div>
       ) : content ? (
-        // `compact` drops Markdown's body from text-base (16px) to
-        // text-sm (14px), bringing it in line with the edit-mode
-        // textareas (13px font-mono). The 1px delta is fine — both are
-        // in the "dense content" band, so preview → edit feels
-        // continuous rather than a font-size jump.
-        <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)] p-4">
-          <Markdown compact>{content}</Markdown>
+        <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)]">
+          <div
+            // `relative` so the fade gradient can position absolutely.
+            // `overflow-hidden` guarantees the clip happens at this layer
+            // even if the inner Markdown does its own positioning. We use
+            // an explicit max-height with transition so expand/collapse
+            // animates rather than snaps.
+            className="relative overflow-hidden transition-[max-height] duration-200 ease-out"
+            style={{
+              maxHeight: showCollapseAffordance && !expanded ? COLLAPSED_MAX_PX : 9999,
+            }}
+          >
+            <div ref={contentRef} className="p-4">
+              {/* `compact` drops Markdown's body from text-base (16px)
+                  to text-sm (14px), bringing it in line with the
+                  edit-mode textareas (13px font-mono). The 1px delta is
+                  fine — both are in the "dense content" band, so
+                  preview → edit feels continuous rather than a
+                  font-size jump. */}
+              <Markdown compact>{content}</Markdown>
+            </div>
+            {showFade && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-[var(--paper)] to-transparent"
+              />
+            )}
+          </div>
+          {showCollapseAffordance && (
+            <div className="flex items-center justify-center border-t border-[var(--line-subtle)]">
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+              >
+                {expanded ? (
+                  <>
+                    <ChevronUp className="h-3.5 w-3.5" />
+                    收起
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="h-3.5 w-3.5" />
+                    展开全部
+                  </>
+                )}
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--line)] bg-[var(--paper)] p-3 text-[12px] text-[var(--ink-muted)]">

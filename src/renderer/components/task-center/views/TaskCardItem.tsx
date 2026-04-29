@@ -238,20 +238,28 @@ function MetaRow({
  * vocabulary the detail overlay uses for the "来自想法" source quote,
  * so the two surfaces read as related. Status colour is carried by the
  * status badge above; this bar doesn't re-encode it.
+ *
+ * Single-line clamp keeps every card the same height regardless of how
+ * verbose the latest message is — the full text is available on hover
+ * tooltip and inside the detail overlay's status timeline.
  */
 function ActivityBar({ message }: { message: string }) {
-  // Softer wash than solid `--paper-inset`. Tailwind's `/60` alpha
-  // modifier doesn't resolve against arbitrary CSS vars, so we go
-  // through color-mix instead.
+  // Softer wash than solid `--paper-inset`. Single-element truncate
+  // (rather than flex + inner span) — wrapping the text in a flex row
+  // would make the inner span a flex item with `min-width: auto`, and
+  // the long Chinese run would push the outer card past its width.
+  // `block` + `truncate` directly on the bordered container avoids that
+  // entire class of overflow bug.
   return (
     <div
-      className="flex items-start gap-2 rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line-strong)] px-2.5 py-1.5 text-[12px] leading-snug text-[var(--ink-muted)]"
+      className="block w-full min-w-0 truncate rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line)] px-2.5 py-1 text-[12px] leading-snug text-[var(--ink-muted)]"
       style={{
         backgroundColor:
-          'color-mix(in srgb, var(--paper-inset) 55%, var(--paper-elevated))',
+          'color-mix(in srgb, var(--paper-inset) 35%, var(--paper-elevated))',
       }}
+      title={message}
     >
-      <span className="line-clamp-2">{message}</span>
+      {message}
     </div>
   );
 }

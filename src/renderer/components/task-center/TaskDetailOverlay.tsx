@@ -41,6 +41,22 @@ import { TaskDocBlock } from './TaskDocBlock';
 import { TaskEditPanel, type FocusDoc } from './TaskEditPanel';
 import { extractErrorMessage } from './errors';
 
+/** Esc-to-close for the overlay's preview mode. The edit panel handles its
+ *  own Esc (with dirty-guard) via PanelChrome.usePanelKeys, so this wires
+ *  itself off when `editing` is true to avoid two handlers firing on the
+ *  same keypress. */
+function useOverlayEsc(active: boolean, onEsc: () => void) {
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      onEsc();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [active, onEsc]);
+}
+
 const OVERLAY_Z = 200;
 
 interface Props {
@@ -97,6 +113,11 @@ export function TaskDetailOverlay({
     onClose();
     return true;
   }, OVERLAY_Z);
+
+  // Esc closes the overlay in preview mode. In edit mode, TaskEditPanel
+  // owns Esc so it can run its dirty-guard before unwinding to preview;
+  // we deactivate the overlay-level Esc to keep them from competing.
+  useOverlayEsc(!editing, onClose);
 
   // Load run stats alongside the fresh task — re-fired on reloadToken so
   // external transitions (scheduler tick) re-aggregate executionCount.
@@ -361,25 +382,36 @@ export function TaskDetailOverlay({
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[85vh] w-[min(780px,92vw)] flex-col overflow-hidden rounded-[var(--radius-2xl)] bg-[var(--paper-elevated)] shadow-2xl"
       >
-        {/* Header — status chip inline with title (single row, saves
-            vertical space vs. the prior badge-then-title stack).
-            Description tucked under on its own line for tasks that have
-            one; tasks without a description skip it entirely. */}
-        <div className="flex items-start gap-3 border-b border-[var(--line)] px-5 py-3">
+        {/* Header — 18px semibold title (PanelChrome hierarchy: panel
+            title is one notch above the 14px section h3s in the body
+            so the user can tell "this is the panel of task X" from
+            "this is the section about X" at a glance). When entering
+            edit mode the header title takes a "编辑：" prefix so the
+            mode change is visible without a separate banner. */}
+        <div className="flex items-start gap-3 border-b border-[var(--line)] px-6 py-4">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <TaskStatusBadge status={task.status} />
-              {/* DispatchOriginBadge: v0.1.69 review — hide the default
-                  "直接派发" which applies to 99% of tasks. Only render
-                  when origin adds information (ai-aligned). */}
-              {task.dispatchOrigin === 'ai-aligned' && (
-                <DispatchOriginBadge origin={task.dispatchOrigin} />
+              {editing ? (
+                <span className="rounded-[var(--radius-sm)] bg-[var(--accent)]/10 px-1.5 py-0.5 text-[11px] font-medium text-[var(--accent)]">
+                  编辑中
+                </span>
+              ) : (
+                <>
+                  <TaskStatusBadge status={task.status} />
+                  {/* DispatchOriginBadge: v0.1.69 review — hide the
+                      default "直接派发" which applies to 99% of tasks.
+                      Only render when origin adds information
+                      (ai-aligned). */}
+                  {task.dispatchOrigin === 'ai-aligned' && (
+                    <DispatchOriginBadge origin={task.dispatchOrigin} />
+                  )}
+                </>
               )}
-              <h2 className="min-w-0 truncate text-[16px] font-semibold text-[var(--ink)]">
+              <h2 className="min-w-0 truncate text-[18px] font-semibold leading-snug text-[var(--ink)]">
                 {task.name}
               </h2>
             </div>
-            {task.description && (
+            {task.description && !editing && (
               <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
                 {task.description}
               </p>
@@ -389,7 +421,7 @@ export function TaskDetailOverlay({
             type="button"
             onClick={onClose}
             className="shrink-0 rounded-[var(--radius-md)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            title="关闭 (Cmd+W)"
+            title="关闭 (Esc / Cmd+W)"
           >
             <X className="h-4 w-4" />
           </button>
@@ -405,7 +437,7 @@ export function TaskDetailOverlay({
             already has `py-1.5` so the overall row height is just
             buttonHeight + 12px breathing room. */}
         {!editing && (
-          <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-5 py-1.5">
+          <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-6 py-1.5">
             {task.status === 'todo' && (
               <ActionBtn
                 icon={<Play className="h-3.5 w-3.5" />}
@@ -457,13 +489,15 @@ export function TaskDetailOverlay({
         )}
 
         {err && (
-          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-5 py-2 text-[12px] text-[var(--error)]">
+          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-6 py-2 text-[12px] text-[var(--error)]">
             {err}
           </div>
         )}
 
-        {/* Body: scrollable */}
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        {/* Body: scrollable. In edit mode TaskEditPanel renders its own
+            footer below; we let the panel hug the entire body so the
+            footer sticks to the modal bottom rather than floating mid-card. */}
+        <div className={editing ? 'flex flex-1 min-h-0 flex-col' : 'flex-1 overflow-y-auto px-6 py-5'}>
           {editing ? (
             <TaskEditPanel
               task={task}
