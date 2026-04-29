@@ -320,8 +320,10 @@ function formatAbsolute(ts: number): string {
  * id appended to `task.sessionIds` — `task.rs::append_session` appends
  * in execution order so the tail is authoritative.
  *
- * Shared by both TaskCardItem and TaskListRow so the affordance is
- * placed identically (immediately left of the ⋯ overflow trigger).
+ * Visual vocabulary mirrors the thought-card hover actions ("AI 讨论"
+ * etc.): icon + label chip with a dark-pill tooltip on hover. Shared by
+ * both TaskCardItem and TaskListRow so the affordance is placed
+ * identically (immediately left of the ⋯ overflow trigger).
  */
 export function ViewSessionButton({ task }: { task?: Task }) {
   if (!task || task.sessionIds.length === 0) return null;
@@ -336,15 +338,20 @@ export function ViewSessionButton({ task }: { task?: Task }) {
     );
   };
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      title="查看任务会话"
-      aria-label="查看任务会话"
-      className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--ink-muted)]/70 opacity-0 transition-[opacity,colors] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)] group-hover:opacity-100 group-focus-within:opacity-100"
-    >
-      <MessageCircle className="h-3.5 w-3.5" strokeWidth={1.5} />
-    </button>
+    <div className="group/view-session relative opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-label="查看会话详情"
+        className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+      >
+        <MessageCircle className="h-3.5 w-3.5" strokeWidth={1.5} />
+        会话详情
+      </button>
+      <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/view-session:opacity-100">
+        查看会话详情
+      </span>
+    </div>
   );
 }
 
