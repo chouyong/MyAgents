@@ -236,7 +236,10 @@ async function imCronToolHandler(args: {
           sessionTarget: args.job.sessionTarget ?? 'new_session',
           workspacePath: addCtx.workspacePath,
           model: addCtx.model,
-          permissionMode: addCtx.permissionMode ?? 'auto',
+          // PRD 0.2.5 R2/R3: empty string = sentinel for "user didn't pick →
+          // use runtime max permission". Don't auto-fill 'auto' (would be
+          // respected literally as acceptEdits and break unattended runs).
+          permissionMode: addCtx.permissionMode ?? '',
           providerEnv: addCtx.providerEnv,
           runtime: addCtx.runtime,
           runtimeConfig: addCtx.runtimeConfig,

@@ -1527,6 +1527,24 @@ export async function handleCronStart(payload: { taskId: string }): Promise<Admi
   return wrapMgmtResponse(resp);
 }
 
+/// PRD 0.2.5 R4 — fire one immediate execution without changing schedule.
+/// Returns { taskId, sessionId, dispatchedAt } on success; { error, code } on
+/// conflict (task currently executing).
+export async function handleCronRunNow(payload: { taskId: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/trigger', 'POST', payload);
+  if (resp.ok) {
+    return {
+      success: true,
+      data: {
+        taskId: (resp as Record<string, unknown>).taskId,
+        sessionId: (resp as Record<string, unknown>).sessionId,
+        dispatchedAt: (resp as Record<string, unknown>).dispatchedAt,
+      },
+    };
+  }
+  return mgmtError(resp, 'Failed to trigger cron');
+}
+
 export async function handleCronDelete(payload: { taskId: string }): Promise<AdminResponse> {
   const resp = await managementApi('/api/cron/delete', 'POST', payload);
   return wrapMgmtResponse(resp);
@@ -1975,11 +1993,17 @@ COMMANDS
   list                            List tasks in the current workspace
   status                          Totals + next execution time
   add OPTIONS                     Create a new task
-  start <taskId>                  Trigger a task for immediate execution
+  start <taskId>                  Enable scheduled task (resume from stopped).
+                                  Does NOT trigger immediate execution — use
+                                  'cron run-now <taskId>' for that.
+  run-now <taskId>                Fire one execution immediately without
+                                  changing the task's schedule or status.
   stop <taskId>                   Pause a running task
   remove <taskId>                 Delete a task
   update <taskId> OPTIONS         Change name / prompt / schedule
-  runs <taskId> [--limit N]       Show recent execution records
+  runs <taskId> [--limit N]       Show recent execution records (output
+                                  truncated to 80 chars per row; pass --full
+                                  for untruncated output)
 
 CREATE OPTIONS (myagents cron add ...)
   --name <text>                   Human-readable label (optional)

@@ -48,7 +48,7 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
       const key = eq >= 0 ? raw.slice(0, eq) : raw;
       const inlineValue = eq >= 0 ? raw.slice(eq + 1) : undefined;
       // Boolean flags (no value follows)
-      if (key === 'help' || key === 'json' || key === 'dry-run' || key === 'disable-nonessential') {
+      if (key === 'help' || key === 'json' || key === 'dry-run' || key === 'disable-nonessential' || key === 'full') {
         flags[camelCase(key)] = true;
         i++;
         continue;
@@ -237,7 +237,7 @@ async function callApi(route: string, body: Record<string, unknown> = {}): Promi
 // Output formatting
 // ---------------------------------------------------------------------------
 
-function printResult(group: string, action: string, result: Record<string, unknown>, jsonMode: boolean): void {
+function printResult(group: string, action: string, result: Record<string, unknown>, jsonMode: boolean, flags: Record<string, unknown> = {}): void {
   if (jsonMode) {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -291,7 +291,19 @@ function printResult(group: string, action: string, result: Record<string, unkno
     return;
   }
   if (group === 'cron' && action === 'runs') {
-    printCronRuns(result.data as Array<Record<string, unknown>>);
+    printCronRuns(result.data as Array<Record<string, unknown>>, !!flags.full);
+    return;
+  }
+  if (group === 'cron' && action === 'run-now') {
+    const data = result.data as Record<string, unknown> | undefined;
+    if (!data) {
+      console.log('✓ Triggered.');
+      return;
+    }
+    console.log(`✓ Triggered ${data.taskId ?? '(unknown)'}`);
+    if (data.sessionId) console.log(`  session: ${data.sessionId}`);
+    if (data.dispatchedAt) console.log(`  dispatched: ${data.dispatchedAt}`);
+    console.log(`  runs:    myagents cron runs ${data.taskId ?? '<id>'} --limit 1`);
     return;
   }
   if (group === 'cron' && action === 'status') {
@@ -728,39 +740,111 @@ function printCronList(tasks: Array<Record<string, unknown>>): void {
     return;
   }
   const pad = (s: string, n: number) => s.padEnd(n);
-  console.log(pad('ID', 24) + pad('Status', 10) + pad('Schedule', 20) + 'Name');
+
+  // R9: Display layer remap. Underlying enum stays Running/Stopped (avoid
+  // schema migration); CLI surfaces the scheduler-semantic terms.
+  const displayStatus = (raw: unknown): string => {
+    const s = String(raw);
+    if (s === 'Running' || s === 'running') return 'enabled';
+    if (s === 'Stopped' || s === 'stopped') return 'disabled';
+    return s.toLowerCase();
+  };
+
+  // R6: short time format for "Next" / "Last" columns. Locale-independent,
+  // fixed width (16 chars), readable.
+  const fmtTime = (iso: unknown): string => {
+    if (!iso || typeof iso !== 'string') return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+  };
+
+  const fmtDuration = (ms: unknown): string => {
+    if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  };
+
+  console.log(
+    pad('ID', 24) +
+    pad('Status', 10) +
+    pad('Schedule', 18) +
+    pad('Next', 18) +
+    pad('Last', 18) +
+    pad('Dur', 9) +
+    pad('Runs', 6) +
+    'Name'
+  );
   for (const t of tasks) {
     const schedule = t.schedule
       ? (typeof t.schedule === 'object' && (t.schedule as Record<string, unknown>).kind === 'cron'
         ? String((t.schedule as Record<string, unknown>).expr)
         : `Every ${t.intervalMinutes}m`)
       : `Every ${t.intervalMinutes}m`;
+    const lastOk = t.lastRunOk;
+    const lastMark = lastOk === true ? '✓ ' : lastOk === false ? '✗ ' : '  ';
+    const lastTime = fmtTime(t.lastExecutedAt);
+    const last = lastTime === '—' ? '—' : `${lastMark}${lastTime}`;
     console.log(
       pad(String(t.id).slice(0, 22), 24) +
-      pad(String(t.status), 10) +
-      pad(schedule.slice(0, 18), 20) +
+      pad(displayStatus(t.status), 10) +
+      pad(schedule.slice(0, 16), 18) +
+      pad(fmtTime(t.nextExecutionAt), 18) +
+      pad(last.slice(0, 17), 18) +
+      pad(fmtDuration(t.lastRunDurationMs), 9) +
+      pad(String(t.executionCount ?? 0), 6) +
       String(t.name ?? (t.prompt as string)?.slice(0, 40) ?? '')
     );
   }
-  const running = tasks.filter(t => t.status === 'Running' || t.status === 'running').length;
-  console.log(`\n${tasks.length} cron tasks (${running} running)`);
+  const enabled = tasks.filter(t => t.status === 'Running' || t.status === 'running').length;
+  console.log(`\n${tasks.length} cron tasks (${enabled} enabled)`);
 }
 
-function printCronRuns(runs: Array<Record<string, unknown>>): void {
+function printCronRuns(runs: Array<Record<string, unknown>>, full: boolean = false): void {
   if (!runs || runs.length === 0) {
     console.log('No execution records.');
     return;
   }
   const pad = (s: string, n: number) => s.padEnd(n);
-  console.log(pad('Time', 22) + pad('Status', 8) + pad('Duration', 12) + 'Output');
+
+  // PRD 0.2.5 R7 \u2014 collapse all whitespace runs (newlines included) so a
+  // multi-line content cell doesn't break column alignment of the next row.
+  // `full` mode keeps original content but renders one line per row anyway \u2014
+  // user opts into that explicitly.
+  const formatCell = (s: string, maxLen: number): string => {
+    const collapsed = s.replace(/\s+/g, ' ').trim();
+    if (full || collapsed.length <= maxLen) return collapsed;
+    return collapsed.slice(0, maxLen - 1) + '\u2026';
+  };
+
+  // Locale-independent fixed-width time format (19 chars).
+  const fmtTime = (ts: unknown): string => {
+    if (!ts) return '?'.padEnd(19);
+    const d = new Date(Number(ts));
+    if (Number.isNaN(d.getTime())) return '?'.padEnd(19);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+  };
+
+  const outputMaxLen = full ? Number.POSITIVE_INFINITY : 80;
+  console.log(pad('Time', 21) + pad('Status', 8) + pad('Duration', 12) + 'Output');
   for (const r of runs) {
-    const time = r.ts ? new Date(Number(r.ts)).toLocaleString() : '?';
+    const time = fmtTime(r.ts);
     const status = r.ok ? '\u2713' : '\u2717';
     const dur = r.durationMs ? `${(Number(r.durationMs) / 1000).toFixed(1)}s` : '?';
-    const output = r.ok
-      ? String(r.content ?? '').slice(0, 50)
-      : String(r.error ?? '').slice(0, 50);
-    console.log(pad(time, 22) + pad(status, 8) + pad(dur, 12) + output);
+    const raw = r.ok ? String(r.content ?? '') : String(r.error ?? '');
+    const output = formatCell(raw, outputMaxLen);
+    console.log(pad(time, 21) + pad(status, 8) + pad(dur, 12) + output);
   }
 }
 
@@ -1139,7 +1223,7 @@ async function main(): Promise<void> {
       }
     }
 
-    printResult(group, action, result, jsonMode);
+    printResult(group, action, result, jsonMode, flags);
   }
 
   // Exit with proper code: 0 = success, 1 = business error
@@ -1352,7 +1436,7 @@ function buildRequestBody(
     if (action === 'readme') {
       return {}; // no body
     }
-    if (action === 'start' || action === 'stop' || action === 'remove') {
+    if (action === 'start' || action === 'stop' || action === 'remove' || action === 'run-now') {
       return { taskId: rest[0] || flags.id };
     }
     if (action === 'update') {

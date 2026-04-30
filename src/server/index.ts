@@ -330,7 +330,7 @@ import {
   awaitExternalSessionStarting,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
-import { VALID_RUNTIMES } from '../shared/types/runtime';
+import { VALID_RUNTIMES, resolveCronPermissionMode } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
@@ -954,6 +954,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'cron/list') return await api.handleCronList(payload as Parameters<typeof api.handleCronList>[0]);
   if (route === 'cron/add') return await api.handleCronCreate(payload);
   if (route === 'cron/start') return await api.handleCronStart(payload as Parameters<typeof api.handleCronStart>[0]);
+  if (route === 'cron/run-now') return await api.handleCronRunNow(payload as Parameters<typeof api.handleCronRunNow>[0]);
   if (route === 'cron/stop') return await api.handleCronStop(payload as Parameters<typeof api.handleCronStop>[0]);
   if (route === 'cron/remove') return await api.handleCronDelete(payload as Parameters<typeof api.handleCronDelete>[0]);
   if (route === 'cron/update') return await api.handleCronUpdate(payload as Parameters<typeof api.handleCronUpdate>[0]);
@@ -2155,34 +2156,34 @@ async function main() {
             }
           }
 
+          // Cron tasks are unattended — "user didn't pick" must map to the
+          // runtime's MAX permission (not its interactive default), or
+          // WebSearch / Bash / mcp__* sit in the approval queue until the
+          // 10-minute deadline kills the run. Sentinels for "didn't pick" are
+          // undefined and empty string. PRD 0.2.5 R2 / regression of 07bc560d.
+          const cronRuntimeType: RuntimeType = shouldUseExternalRuntime() ? getActiveRuntimeType() : 'builtin';
+          const effectivePermissionMode = resolveCronPermissionMode(
+            payload.permissionMode,
+            effectiveRuntimeConfig?.permissionMode,
+            cronRuntimeType,
+          );
+
           if (shouldUseExternalRuntime()) {
-            const runtimeConfig = effectiveRuntimeConfig ?? null;
             const runtimeResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
-                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
-                model: getRuntimeConfigModel(runtimeConfig),
+                permissionMode: effectivePermissionMode,
+                model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
               },
             );
             if (!runtimeResult.queued) {
               return jsonResponse({ success: false, error: runtimeResult.error ?? 'Failed to start cron via external runtime' }, 503);
             }
           } else {
-            // Cron tasks are unattended — by default bypass all permissions
-            // so tool requests don't block indefinitely waiting for a user
-            // who isn't present. But if the user explicitly picked a stricter
-            // mode in the task editor, honor it (PRD 0.2.4 §需求 4 — "默认
-            // 最大权限，主动选择则尊重"). Precedence: payload.permissionMode
-            // > snapshot resolved > 'fullAgency'.
-            const effectivePermissionMode = (
-              (payload.permissionMode as PermissionMode | undefined)
-              ?? (effectiveRuntimeConfig?.permissionMode as PermissionMode | undefined)
-              ?? 'fullAgency'
-            );
-            await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode, effectiveModel, effectiveProviderEnv);
+            await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode as PermissionMode, effectiveModel, effectiveProviderEnv);
           }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
@@ -2402,18 +2403,28 @@ async function main() {
 
           let textContent = '';
 
+          // PRD 0.2.5 R2 — unified "user didn't pick → runtime max" resolver.
+          // Sentinels for "didn't pick" are undefined and empty string.
+          // Concrete values (auto/plan/fullAgency/default/etc.) are respected
+          // literally. See src/shared/types/runtime.ts::resolveCronPermissionMode.
+          const cronRuntimeType: RuntimeType = shouldUseExternalRuntime() ? getActiveRuntimeType() : 'builtin';
+          const effectivePermissionMode = resolveCronPermissionMode(
+            payload.permissionMode,
+            effectiveRuntimeConfig?.permissionMode,
+            cronRuntimeType,
+          );
+
           if (shouldUseExternalRuntime()) {
             // ─── External Runtime (CC/Codex): cron task ───
             // T15: effectiveRuntimeConfig carries snapshot-resolved model/permissionMode
-            const runtimeConfig = effectiveRuntimeConfig ?? null;
             const ccResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
-                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
-                model: getRuntimeConfigModel(runtimeConfig),
+                permissionMode: effectivePermissionMode,
+                model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
               },
             );
             if (!ccResult.queued) {
@@ -2478,20 +2489,11 @@ async function main() {
             // from interleaving across the abort/restart window).
             await applyMcpOverrideAndAwaitReady(target);
 
-            // Cron tasks are unattended — by default bypass all permissions
-            // so tool requests (e.g. Bash) don't block forever waiting for
-            // human approval. But if the user explicitly picked a stricter
-            // mode in the task editor, honor it (PRD 0.2.4 §需求 4 — "默认
-            // 最大权限，主动选择则尊重"). Precedence: payload.permissionMode
-            // > snapshot resolved > 'fullAgency'.
+            // PRD 0.2.5 R2: effectivePermissionMode resolved above via
+            // resolveCronPermissionMode (shared with external runtime branch).
             // T15: effectiveModel / effectiveProviderEnv come from the session snapshot
             //      (single_session) or payload defaults (new_session / fallback).
-            const effectivePermissionMode = (
-              (payload.permissionMode as PermissionMode | undefined)
-              ?? (effectiveRuntimeConfig?.permissionMode as PermissionMode | undefined)
-              ?? 'fullAgency'
-            );
-            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode, effectiveModel, effectiveProviderEnv);
+            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode as PermissionMode, effectiveModel, effectiveProviderEnv);
             console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
             // Wait for session to become idle (execution complete)

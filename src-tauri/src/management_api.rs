@@ -89,6 +89,7 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/cron/update", post(update_cron_handler))
         .route("/api/cron/delete", post(delete_cron_handler))
         .route("/api/cron/run", post(run_cron_handler))
+        .route("/api/cron/trigger", post(trigger_cron_handler))
         .route("/api/cron/runs", get(runs_cron_handler))
         .route("/api/cron/status", get(status_cron_handler))
         .route("/api/im/channels", get(list_im_channels_handler))
@@ -186,6 +187,18 @@ struct CronTaskSummary {
     execution_count: u32,
     last_executed_at: Option<String>,
     created_at: String,
+    /// Computed next-fire time (Rust enriches at read; never persisted).
+    /// PRD 0.2.5 R6 — exposed for `cron list` Next column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_execution_at: Option<String>,
+    /// Last run success flag — denormalized from `cron_runs/<id>.jsonl`.
+    /// PRD 0.2.5 R6.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_ok: Option<bool>,
+    /// Last run duration in milliseconds — same denormalization as above.
+    /// PRD 0.2.5 R6.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_duration_ms: Option<u64>,
 }
 
 impl From<CronTask> for CronTaskSummary {
@@ -202,6 +215,9 @@ impl From<CronTask> for CronTaskSummary {
             execution_count: t.execution_count,
             last_executed_at: t.last_executed_at.map(|dt| dt.to_rfc3339()),
             created_at: t.created_at.to_rfc3339(),
+            next_execution_at: t.next_execution_at,
+            last_run_ok: t.last_run_ok,
+            last_run_duration_ms: t.last_run_duration_ms,
         }
     }
 }
@@ -387,6 +403,41 @@ async fn run_cron_handler(
     }
 
     Json(ApiResponse { ok: true, error: None })
+}
+
+/// PRD 0.2.5 R4 — POST /api/cron/trigger
+/// Fire one immediate execution of an existing cron task without modifying
+/// its schedule or status. Fire-and-forget: returns as soon as the dispatch
+/// kicks off (does NOT wait for the AI to finish).
+async fn trigger_cron_handler(
+    Json(req): Json<TaskIdRequest>,
+) -> Json<serde_json::Value> {
+    let manager = cron_task::get_cron_task_manager();
+    match manager.trigger_now(&req.task_id).await {
+        Ok(info) => Json(serde_json::json!({
+            "ok": true,
+            "taskId": info.task_id,
+            "sessionId": info.session_id,
+            "dispatchedAt": info.dispatched_at,
+        })),
+        Err(e) => {
+            let is_conflict = e.contains("currently executing");
+            // 409 semantics for "task busy"; 404/500 fall through to the
+            // generic ApiResponse shape consumers already understand.
+            if is_conflict {
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                    "code": "task_busy",
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                }))
+            }
+        }
+    }
 }
 
 // ===== Runs / Status / Wake handlers =====
@@ -1364,7 +1415,7 @@ async fn task_run_handler(
     if ta.status != task::TaskStatus::Todo {
         return Json(serde_json::json!({
             "ok": false,
-            "error": format!("task is in state '{}'; use /api/task/rerun to re-dispatch it", ta.status.as_str())
+            "error": format!("task is in state '{}'; use 'myagents task rerun {}' to re-dispatch it", ta.status.as_str(), ta.id)
         }));
     }
 

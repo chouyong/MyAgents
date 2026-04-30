@@ -301,3 +301,59 @@ export function getDefaultRuntimePermissionMode(runtime: RuntimeType): string {
     default: return '';
   }
 }
+
+/**
+ * Get the highest-permission mode for the given runtime.
+ *
+ * Used in unattended contexts (cron task dispatch, agent task execution) where
+ * "user didn't pick anything" should mean "give me whatever lets the AI
+ * actually run without blocking on a human approval that never comes".
+ *
+ * Distinct from getDefaultRuntimePermissionMode() which returns each runtime's
+ * INTERACTIVE default (auto/default/autoEdit/full-auto). Those defaults are
+ * correct for chat tabs but pathological for cron — they leave WebSearch /
+ * Bash / mcp__* in a pending-approval state that times out on a 10-minute
+ * deadline.
+ *
+ * Per-runtime mapping:
+ *   - builtin     → 'fullAgency'        (mapToSdkPermissionMode → bypassPermissions)
+ *   - claude-code → 'bypassPermissions' (CC CLI native value, no translation)
+ *   - codex       → 'no-restrictions'   (Codex sandbox: skip approvals + sandbox)
+ *   - gemini      → 'yolo'              (Gemini ACP: skip all confirmations)
+ */
+export function getMaxPermissionForRuntime(runtime: RuntimeType): string {
+  switch (runtime) {
+    case 'builtin':     return 'fullAgency';
+    case 'claude-code': return 'bypassPermissions';
+    case 'codex':       return 'no-restrictions';
+    case 'gemini':      return 'yolo';
+    default:            return 'fullAgency';
+  }
+}
+
+/**
+ * Resolve the effective permissionMode for a cron / unattended task tick.
+ *
+ * Semantics:
+ *   - undefined / '' (sentinel "user didn't pick") → runtime max permission
+ *   - any other literal value → respected as user's explicit choice
+ *
+ * Crucially, 'auto' / 'default' / 'autoEdit' / 'full-auto' are NOT treated as
+ * "user didn't pick" — they're the runtime's interactive defaults but if a
+ * user has them in their cron config, that's a literal value we honor. The
+ * only sentinel for "use max" is empty/undefined.
+ *
+ * (Historical note: pre-v0.2.5, cron config persisted 'auto' as a silent
+ * default even when the user never picked anything. The v0.2.5 migration in
+ * src-tauri/src/cron_task.rs::load_from_disk clears those values to empty
+ * string before they reach this resolver.)
+ */
+export function resolveCronPermissionMode(
+  payloadMode: string | null | undefined,
+  snapshotMode: string | null | undefined,
+  runtime: RuntimeType,
+): string {
+  const userMode = (payloadMode || snapshotMode || '').trim();
+  if (!userMode) return getMaxPermissionForRuntime(runtime);
+  return userMode;
+}
