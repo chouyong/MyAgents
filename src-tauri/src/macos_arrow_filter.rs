@@ -16,10 +16,12 @@
 //! versions still need that same `keyDown:` path for normal caret movement,
 //! so swallowing arrows makes the cursor stop moving.
 //!
-//! Instead, install a narrow `insertText:` filter on wry's WKWebView
-//! subclass. Arrow key events continue through WebKit unchanged; if AppKit
-//! later tries to insert a pure NSFunctionKey private-use string, only that
-//! insertion is dropped.
+//! A narrow `insertText:` filter catches the legacy AppKit route when it is
+//! used. On current WKWebView builds the leak can also land inside the DOM
+//! during WebKit's `keyDown:` handling, without calling `insertText:` on the
+//! wry view. For that path we forward `keyDown:` normally so the caret still
+//! moves, then evaluate a small cleanup script that removes AppKit's private
+//! NSFunctionKey codepoints from the focused text control.
 //!
 //! That fix was lost during wry's objc2 migration and has NOT been
 //! reintroduced in any released version up to wry 0.55.0 (2026-03-26).
@@ -36,8 +38,159 @@ use std::sync::Once;
 use objc2::ffi::{class_addMethod, class_getSuperclass, objc_msgSendSuper, objc_super};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::{msg_send, sel};
+use objc2_foundation::NSString;
+use objc2_web_kit::WKWebView;
 
 static INSTALL: Once = Once::new();
+
+const FUNCTION_KEY_DOM_CLEANUP_JS: &str = r#"
+(() => {
+  const containsFunctionKey = /[\uF700-\uF74F]/;
+  const functionKeyRange = /[\uF700-\uF74F]/g;
+  const textInputTypes = new Set(['', 'email', 'number', 'password', 'search', 'tel', 'text', 'url']);
+
+  const stripFunctionKeys = (value) => String(value).replace(functionKeyRange, '');
+  const cleanedIndex = (value, index) => {
+    if (typeof index !== 'number' || index < 0) return index;
+    return stripFunctionKeys(String(value).slice(0, index)).length;
+  };
+
+  const dispatchInput = (el) => {
+    try {
+      if (typeof InputEvent === 'function') {
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          cancelable: false,
+          composed: true,
+          data: null,
+          inputType: 'deleteContentBackward',
+        }));
+      } else {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } catch (_) {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  };
+
+  const nativeValueSetter = (el) => {
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : el instanceof HTMLInputElement
+        ? HTMLInputElement.prototype
+        : null;
+    return proto ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : null;
+  };
+
+  const setValue = (el, value) => {
+    const setter = nativeValueSetter(el);
+    if (setter) setter.call(el, value);
+    else el.value = value;
+  };
+
+  const cleanTextControl = (el) => {
+    if (!(el instanceof HTMLTextAreaElement) && !(el instanceof HTMLInputElement)) return 0;
+    if (el instanceof HTMLInputElement && !textInputTypes.has((el.getAttribute('type') || '').toLowerCase())) return 0;
+    const value = String(el.value ?? '');
+    if (!containsFunctionKey.test(value)) return 0;
+
+    let start = null;
+    let end = null;
+    let direction = 'none';
+    try {
+      start = el.selectionStart;
+      end = el.selectionEnd;
+      direction = el.selectionDirection || 'none';
+    } catch (_) {}
+
+    const nextValue = stripFunctionKeys(value);
+    setValue(el, nextValue);
+
+    try {
+      if (typeof start === 'number' && typeof end === 'number') {
+        el.setSelectionRange(cleanedIndex(value, start), cleanedIndex(value, end), direction);
+      }
+    } catch (_) {}
+
+    dispatchInput(el);
+    return value.length - nextValue.length;
+  };
+
+  const nodeOffsetLimit = (node) => {
+    if (!node) return 0;
+    return node.nodeType === Node.TEXT_NODE
+      ? String(node.nodeValue ?? '').length
+      : node.childNodes.length;
+  };
+
+  const cleanContentEditable = (root) => {
+    if (!root?.isContentEditable) return 0;
+
+    const selection = window.getSelection?.();
+    const anchorNode = selection?.anchorNode ?? null;
+    const focusNode = selection?.focusNode ?? null;
+    let anchorOffset = selection?.anchorOffset ?? 0;
+    let focusOffset = selection?.focusOffset ?? 0;
+    let removed = 0;
+
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      const value = String(node.nodeValue ?? '');
+      if (containsFunctionKey.test(value)) {
+        if (node === anchorNode) anchorOffset = cleanedIndex(value, anchorOffset);
+        if (node === focusNode) focusOffset = cleanedIndex(value, focusOffset);
+        const nextValue = stripFunctionKeys(value);
+        node.nodeValue = nextValue;
+        removed += value.length - nextValue.length;
+      }
+      node = walker.nextNode();
+    }
+
+    if (removed > 0) {
+      try {
+        if (selection && anchorNode && focusNode && root.contains(anchorNode) && root.contains(focusNode)) {
+          const range = document.createRange();
+          range.setStart(anchorNode, Math.min(anchorOffset, nodeOffsetLimit(anchorNode)));
+          range.setEnd(focusNode, Math.min(focusOffset, nodeOffsetLimit(focusNode)));
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      } catch (_) {}
+      dispatchInput(root);
+    }
+
+    return removed;
+  };
+
+  const activeElement = () => {
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    return active;
+  };
+
+  const candidates = () => {
+    const active = activeElement();
+    const fields = [active, ...document.querySelectorAll('textarea,input')].filter(Boolean);
+    return Array.from(new Set(fields));
+  };
+
+  const run = () => {
+    let removed = 0;
+    for (const el of candidates()) removed += cleanTextControl(el);
+    removed += cleanContentEditable(activeElement());
+    return removed;
+  };
+
+  const total = run();
+  if (typeof queueMicrotask === 'function') queueMicrotask(run);
+  else Promise.resolve().then(run);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  setTimeout(run, 0);
+  setTimeout(run, 32);
+  return total;
+})();
+"#;
 
 pub fn install_arrow_key_filter() {
     INSTALL.call_once(|| unsafe {
@@ -139,23 +292,35 @@ fn find_wry_webview_class() -> Option<&'static AnyClass> {
     // wry 0.54.4 removed `#[name = "WryWebView"]`. objc2 then generates a
     // version-suffixed class name such as
     // `wry::wkwebview::class::wry_web_view::WryWebView0.54.4`.
-    let mut found = None;
+    let mut generated = None;
+    let mut kvo_subclass = None;
     let mut matches = Vec::new();
     for cls in AnyClass::classes().iter().copied() {
         let name = cls.name().to_string_lossy();
         if is_wry_webview_class_name(&name) {
+            if name.starts_with("..NSKVONotifying_") {
+                kvo_subclass = Some(cls);
+            } else {
+                generated = Some(cls);
+            }
             matches.push(name.into_owned());
-            found = Some(cls);
         }
     }
 
-    if matches.len() > 1 {
-        crate::ulog_warn!(
-            "[macos_arrow_filter] multiple WryWebView-like classes found: {}; using last registered match",
-            matches.join(", ")
-        );
-    } else if let Some(name) = matches.first() {
-        crate::ulog_info!("[macos_arrow_filter] found generated WryWebView class: {name}");
+    let found = generated.or(kvo_subclass);
+    if let Some(cls) = found {
+        let selected = cls.name().to_string_lossy();
+        if matches.len() > 1 {
+            crate::ulog_warn!(
+                "[macos_arrow_filter] multiple WryWebView-like classes found: {}; using {}",
+                matches.join(", "),
+                selected
+            );
+        } else {
+            crate::ulog_info!(
+                "[macos_arrow_filter] found generated WryWebView class: {selected}"
+            );
+        }
     }
 
     found
@@ -268,7 +433,31 @@ extern "C" fn key_down_probe(this: *mut AnyObject, _sel: Sel, event: *mut AnyObj
         type SuperKeyDown = extern "C" fn(*const objc_super, Sel, *mut AnyObject);
         let send_super: SuperKeyDown = std::mem::transmute(objc_msgSendSuper as *const ());
         send_super(&super_struct, sel!(keyDown:), event);
+
+        if is_arrow || has_function_text {
+            schedule_function_key_dom_cleanup(this, keycode, has_function_text);
+        }
     }
+}
+
+unsafe fn schedule_function_key_dom_cleanup(
+    webview: *mut AnyObject,
+    keycode: u16,
+    has_function_text: bool,
+) {
+    if webview.is_null() {
+        return;
+    }
+
+    crate::ulog_warn!(
+        "[macos_arrow_filter] keyDown forwarded; scheduled DOM private-use cleanup keycode={} has_function_text={}",
+        keycode,
+        has_function_text
+    );
+
+    let script = NSString::from_str(FUNCTION_KEY_DOM_CLEANUP_JS);
+    let webview = &*(webview as *mut WKWebView);
+    webview.evaluateJavaScript_completionHandler(&script, None);
 }
 
 unsafe fn super_struct(this: *mut AnyObject) -> objc_super {
