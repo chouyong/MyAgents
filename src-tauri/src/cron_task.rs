@@ -706,6 +706,13 @@ fn enrich_task(mut task: CronTask) -> CronTask {
     task
 }
 
+/// Public alias for `enrich_task` used by management_api projection paths
+/// that don't go through the manager's accessor methods (e.g. echoing the
+/// just-updated task back from `update_cron_handler`). Issue #115.
+pub fn enrich_for_summary(task: CronTask) -> CronTask {
+    enrich_task(task)
+}
+
 /// Manager for cron tasks
 pub struct CronTaskManager {
     pub(crate) tasks: Arc<RwLock<HashMap<String, CronTask>>>,
@@ -2013,17 +2020,72 @@ impl CronTaskManager {
             if schedule_val.is_null() {
                 task.schedule = None;
             } else if let Ok(s) = serde_json::from_value::<CronSchedule>(schedule_val.clone()) {
+                // Issue #115 Bug B — preserve `tz` when patch is a bare cron
+                // expression that didn't specify one. CLI's
+                // `normalizeScheduleFlag` for the bare-string form returns
+                // `{kind:cron, expr}` with no `tz` field, so this is the
+                // typical "user just wanted to change the firing pattern"
+                // intent; silently dropping the existing tz changes the
+                // meaning of the schedule from the user's local TZ to UTC.
+                //
+                // Merge rule: Cron-with-no-tz patch onto Cron-with-tz prev
+                // → inherit tz. All other transitions (Every↔Cron, explicit
+                // tz set, switch to At/Loop) replace wholesale, matching
+                // user's explicit intent.
+                let merged = match (&prev_schedule, s) {
+                    (
+                        Some(CronSchedule::Cron { tz: Some(prev_tz), .. }),
+                        CronSchedule::Cron { expr, tz: None },
+                    ) => CronSchedule::Cron { expr, tz: Some(prev_tz.clone()) },
+                    (_, other) => other,
+                };
                 // Mirror interval_minutes when switching to a fixed-interval schedule,
                 // so any downstream reader that falls back to the legacy field stays
                 // consistent.
-                if let CronSchedule::Every { minutes, .. } = &s {
+                if let CronSchedule::Every { minutes, .. } = &merged {
                     task.interval_minutes = *minutes;
                 }
-                task.schedule = Some(s);
+                task.schedule = Some(merged);
             }
         }
         if let Some(end_conditions_val) = patch.get("endConditions") {
-            if let Ok(ec) = serde_json::from_value::<EndConditions>(end_conditions_val.clone()) {
+            // Issue #115 cross-review (Pattern B) — endConditions is a
+            // nested struct with three independently-meaningful fields
+            // (deadline / max_executions / ai_can_exit). Treating the
+            // patch as a wholesale replacement silently zeroes out any
+            // field the caller didn't include — e.g. a CLI `cron update
+            // --endConditions '{"deadline":"..."}'` would lose the
+            // previously-set max_executions and ai_can_exit. Merge per
+            // field, only overwriting keys the patch actually carries.
+            if let Some(obj) = end_conditions_val.as_object() {
+                if obj.contains_key("deadline") {
+                    if let Some(v) = obj.get("deadline") {
+                        task.end_conditions.deadline = if v.is_null() {
+                            None
+                        } else {
+                            serde_json::from_value(v.clone()).unwrap_or(task.end_conditions.deadline)
+                        };
+                    }
+                }
+                if obj.contains_key("maxExecutions") {
+                    if let Some(v) = obj.get("maxExecutions") {
+                        task.end_conditions.max_executions = if v.is_null() {
+                            None
+                        } else {
+                            v.as_u64().map(|n| n as u32).or(task.end_conditions.max_executions)
+                        };
+                    }
+                }
+                if obj.contains_key("aiCanExit") {
+                    if let Some(b) = obj.get("aiCanExit").and_then(|v| v.as_bool()) {
+                        task.end_conditions.ai_can_exit = b;
+                    }
+                }
+            } else if let Ok(ec) = serde_json::from_value::<EndConditions>(end_conditions_val.clone()) {
+                // Non-object form (e.g. legacy callers passing a fully-typed
+                // struct) — fall back to wholesale replace, which is what
+                // the old behavior was. The merge above only kicks in for
+                // partial-object patches, which is the common CLI case.
                 task.end_conditions = ec;
             }
         }

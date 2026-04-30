@@ -376,15 +376,27 @@ async fn list_cron_handler(
 
 async fn update_cron_handler(
     Json(req): Json<UpdateCronRequest>,
-) -> Json<ApiResponse> {
+) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
     match manager.update_task_fields(&req.task_id, req.patch).await {
-        Ok(_) => Json(ApiResponse { ok: true, error: None }),
-        Err(e) => Json(ApiResponse {
-            ok: false,
-            error: Some(e),
-        }),
+        Ok(updated) => {
+            // Issue #115 — return the enriched task so callers can echo
+            // the post-update `nextExecutionAt` + tz. CLI uses this to
+            // print "next fire: <local time>" right after `✓ update`,
+            // which prevents the strict-after-now confusion users hit
+            // when reading the bare UTC value in a later `cron list`.
+            let enriched = cron_task::enrich_for_summary(updated);
+            let summary = CronTaskSummary::from(enriched);
+            Json(serde_json::json!({
+                "ok": true,
+                "task": summary,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        })),
     }
 }
 

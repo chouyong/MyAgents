@@ -29,6 +29,7 @@ import {
   type ChannelConfigSlim,
 } from './utils/admin-config';
 import { cancellableFetch } from './utils/cancellation';
+import { readLoopbackJson } from './utils/loopback-response';
 
 // Localhost loopback timeout for management / sidecar self-calls.
 // 10s is generous for an in-process Rust handler or a same-process Hono
@@ -114,7 +115,8 @@ async function managementApi(
   }
   try {
     const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
-    return resp.json() as Promise<Record<string, unknown>>;
+    // Issue #114 — defensive read via shared helper.
+    return await readLoopbackJson(resp, 'Management API');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -151,7 +153,11 @@ async function sidecarSelf(
   }
   try {
     const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
-    const json = await resp.json() as Record<string, unknown>;
+    // Issue #114 — defensive read via shared helper. Map to this caller's
+    // legacy {status, json} shape (sidecarSelf has callers that branch on
+    // status code, so we preserve that envelope rather than collapsing to
+    // a flat error object).
+    const json = await readLoopbackJson(resp, 'Sidecar self-call');
     return { status: resp.status, json };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1552,7 +1558,15 @@ export async function handleCronDelete(payload: { taskId: string }): Promise<Adm
 
 export async function handleCronUpdate(payload: { taskId: string; patch: Record<string, unknown> }): Promise<AdminResponse> {
   const resp = await managementApi('/api/cron/update', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  if (resp.ok) {
+    // Issue #115 — surface the post-update task summary so CLI can echo
+    // `nextExecutionAt` (computed with tz) right after `✓ update`. Avoids
+    // the "I just changed schedule, why does the next run show +1h" UX
+    // confusion that strict-after-now causes when the user re-checks
+    // later via `cron list`.
+    return { success: true, data: (resp as Record<string, unknown>).task ?? null };
+  }
+  return mgmtError(resp, 'Failed to update cron task');
 }
 
 export async function handleCronRuns(payload: { taskId: string; limit?: number }): Promise<AdminResponse> {

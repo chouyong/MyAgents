@@ -306,6 +306,43 @@ function printResult(group: string, action: string, result: Record<string, unkno
     console.log(`  runs:    myagents cron runs ${data.taskId ?? '<id>'} --limit 1`);
     return;
   }
+  if (group === 'cron' && action === 'update') {
+    // Issue #115 — echo the computed next fire time + tz so users see
+    // exactly when their schedule edit will fire next. Avoids the
+    // strict-after-now confusion ("I changed to minute 33, why does
+    // list show 33 next hour") by anchoring the display at update time.
+    const task = result.data as Record<string, unknown> | null;
+    const taskId = task?.id ?? '<id>';
+    console.log(`✓ Updated ${taskId}`);
+    if (task) {
+      const sched = task.schedule as Record<string, unknown> | undefined;
+      if (sched && sched.kind === 'cron') {
+        const tz = (sched.tz as string | undefined) ?? 'UTC';
+        console.log(`  schedule: ${sched.expr} (${tz})`);
+      }
+      const nextRaw = task.nextExecutionAt as string | undefined;
+      if (nextRaw) {
+        // Format in the schedule's tz (or UTC fallback) so the time the
+        // user reads matches the time the scheduler will actually fire.
+        const nextDate = new Date(nextRaw);
+        if (!Number.isNaN(nextDate.getTime())) {
+          const tz = ((task.schedule as Record<string, unknown> | undefined)?.tz as string | undefined) ?? 'UTC';
+          let local = '';
+          try {
+            local = nextDate.toLocaleString('sv-SE', { timeZone: tz, hour12: false });
+          } catch {
+            local = nextDate.toISOString();
+          }
+          const diffMs = nextDate.getTime() - Date.now();
+          const diffStr = diffMs > 0
+            ? ` (in ${formatRelativeMs(diffMs)})`
+            : ' (in the past)';
+          console.log(`  next fire: ${local} ${tz}${diffStr}`);
+        }
+      }
+    }
+    return;
+  }
   if (group === 'cron' && action === 'status') {
     printCronStatus(result.data as Record<string, unknown>);
     return;
@@ -1128,6 +1165,24 @@ function printAgentRuntimeStatus(data: Record<string, unknown>): void {
     }
     console.log('');
   }
+}
+
+/// Issue #115 — format a millisecond-precision delta into a coarse
+/// "in X" string for `cron update` next-fire echoes. Reads naturally for
+/// the cases users care about: a few seconds, a few minutes, an hour-ish,
+/// a day-ish. Beyond a day we fall back to days+hours.
+function formatRelativeMs(ms: number): string {
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  if (min < 60) return remSec > 0 ? `${min}m ${remSec}s` : `${min}m`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  if (hr < 24) return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+  const day = Math.floor(hr / 24);
+  const remHr = hr % 24;
+  return remHr > 0 ? `${day}d ${remHr}h` : `${day}d`;
 }
 
 function formatObject(obj: Record<string, unknown> | undefined, indent = '  '): string {
