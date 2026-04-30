@@ -1,54 +1,58 @@
-// Global guard for the macOS WKWebView function-key tofu leak.
+// Global guard for the macOS WKWebView control-codepoint tofu leak.
 //
-// When the user presses an arrow / page-up / home / end key at a textarea
-// boundary (cursor at index 0 pressing ←, or cursor at end pressing →),
-// AppKit's NSEvent characters carry the key as a Unicode private-use
-// codepoint in the U+F700-F74F band — see NSFunctionKey in AppKit.
-// WebKit *should* consume these in `keydown` to move the cursor, but at
-// the boundary the cursor cannot move; the codepoint then falls through
-// to the default `insertText:` AppKit selector and lands in the input
-// value as a tofu glyph (no font carries U+F700-F74F).
+// Several macOS keyboard paths leak unprintable codepoints into
+// textarea / input values, rendered as tofu glyphs:
 //
-// We use **two layers** because empirically `beforeinput` is not always
-// fired for this leak path on Tauri's WKWebView (the codepoint can
-// reach the value via the AppKit selector route that bypasses
-// WebCore's edit-command pipeline). Belt-and-suspenders:
+//   - **Arrow / page / home / end** at a boundary → C0 control
+//     codepoints U+001C-U+001F (FS/GS/RS/US), the legacy ANSI mapping.
+//     NSEvent.characters also carries these in U+F700-U+F74F
+//     (NSFunctionKey naming) but WebKit's silent edit path inserts the
+//     C0 form, not the NSFunctionKey one.
 //
-//   1. **`beforeinput` capture-phase preventDefault** — when WebKit
-//      *does* route the leak through the standard edit pipeline, we
-//      cancel the insertion at source. DOM is never mutated, no
-//      `input` event fires, React is never disturbed.
+//   - **Cmd / Ctrl shortcuts that fail to bind a command** (e.g., Cmd+V
+//     on an empty clipboard) → other C0 controls leak through the
+//     `keyDown:` fallback. Cmd+V can leak U+0016 (SYN, Ctrl+V's ASCII
+//     mapping) for example.
 //
-//   2. **`input` capture-phase native-setter strip** — fallback for
-//      paths that bypass `beforeinput`. We rewrite the DOM value via
-//      the **native** prototype setter (NOT via `el.value = ...`,
-//      which would go through React's intercepted setter and update
-//      its valueTracker, suppressing the legitimate `onChange`). The
-//      tracker stays at its pre-leak value, so React's bubble-phase
-//      listener correctly fires `onChange` with the cleaned string
-//      when there's a real diff, and stays silent when the leak was
-//      the only mutation (state was already clean — no work to do).
+// Strategy: the ONLY printable-and-legitimate C0/C1 controls in normal
+// text input are Tab (U+0009), LF (U+000A), and CR (U+000D). Everything
+// else in the C0 (U+0000-U+001F), DEL (U+007F), and C1 (U+0080-U+009F)
+// ranges is treated as a leak and stripped — along with the
+// NSFunctionKey range U+F700-U+F74F. This catches every variant of
+// the keyboard-shortcut tofu leak without needing to enumerate which
+// codepoint each shortcut leaks.
 //
-// IME composition (`insertCompositionText`), paste (`insertFromPaste`),
-// drag-drop, and other inputTypes are skipped — empirically no leak,
-// and intercepting them risks breaking real input. The fallback
-// strip-on-input also runs for any input event, but the F700-F74F
-// presence check fast-paths in microseconds for clean text and is the
-// only thing that actually triggers a write.
+// Defense layers (capture-phase, document-level):
 //
-// Tauri's WKWebView on macOS exposes the bug; WebView2 (Win) and
-// webkit2gtk (Linux) don't, so the codepoint check fast-paths out on
-// every keystroke outside macOS — effectively a no-op.
+//   1. `beforeinput` — preventDefault when WebKit routes the leak
+//      through the standard edit pipeline. DOM is never mutated.
+//
+//   2. `input` — fallback for paths that fire `input` but skip
+//      `beforeinput`. Rewrites the DOM value via the **native**
+//      prototype setter (NOT `el.value =`, which goes through React's
+//      intercepted setter and updates its valueTracker, suppressing
+//      the legitimate `onChange`).
+//
+//   3. `keydown` — fallback for the WORST path on wry 0.54.4 +
+//      WKWebView (objc2 migration regression): WebKit silently mutates
+//      the textarea DOM value during keyDown handling without firing
+//      either `beforeinput` or `input`. Layers 1 & 2 never see this
+//      leak. We schedule scrubs across micro-task / rAF / setTimeout
+//      boundaries; whichever runs after WebKit's silent mutation
+//      catches it before paint.
+//
+// WebView2 (Win) and webkit2gtk (Linux) don't have the leak, so the
+// codepoint check fast-paths out on every keystroke off macOS.
+//
+// See `specs/tech_docs/macos_arrow_key_leak_investigation.md` for the
+// full investigation log including the C0-control-codepoint discovery.
 
 let installed = false;
 
-// Capture the original prototype setters once, before React has had any
-// chance to patch them. We reach for these in `flushDom` to write back
-// the cleaned value WITHOUT going through React's valueTracker — that
-// is what preserves the legitimate `onChange` for mixed-content cases.
-// (Note: React patches the *instance* value setter on each tracked
-// element, layered on top of the prototype setter. Calling the
-// prototype setter directly bypasses the patch.)
+// Capture the original prototype setters once, before React patches
+// the instance setter on tracked elements. Calling the prototype
+// setter directly bypasses React's value tracker, which is what
+// preserves the legitimate `onChange` for mixed-content cases.
 const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
   HTMLInputElement.prototype,
   'value',
@@ -58,22 +62,36 @@ const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
   'value',
 )?.set;
 
+// Older scheduled scrubs become no-ops once 4 newer keydowns arrive,
+// so a long key-repeat doesn't fan out into N×5 simultaneous retries.
+let scrubGeneration = 0;
+
+// Keys that AppKit can route through the function-key codepoint bands.
+// We also scrub on any Cmd/Ctrl-modified key (covers Cmd+V on empty
+// clipboard, Cmd+anything-not-bound, Ctrl+letter Emacs bindings) and
+// on any key whose `event.key` itself contains a leak codepoint.
+const FUNCTION_KEY_NAMES: ReadonlySet<string> = new Set([
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'PageUp', 'PageDown', 'Home', 'End',
+  'F1', 'F2', 'F3', 'F4', 'F5', 'F6',
+  'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+  'Insert',
+]);
+
 export function installMacFunctionKeyGuard(): void {
   if (installed) return;
   installed = true;
   document.addEventListener('beforeinput', onBeforeInput, { capture: true });
   document.addEventListener('input', onInput, { capture: true });
-  // Diagnostic — appears once at startup, in the Tauri DevTools console.
-  // If you don't see this line in DevTools, the renderer bundle wasn't
-  // rebuilt and the running app is still on stale JS.
-  console.info('[macFunctionKeyGuard] installed (beforeinput + input capture)');
+  document.addEventListener('keydown', onKeyDown, { capture: true });
+  // Cmd+V on empty clipboard (and other failed shortcuts) can leak via
+  // the `paste` path without going through `beforeinput`. Schedule a
+  // post-event scrub to catch those.
+  document.addEventListener('paste', scheduleScrub, { capture: true });
 }
 
 function onBeforeInput(e: Event): void {
   const ie = e as InputEvent;
-  // `insertReplacementText` is included for defense-in-depth — spell-
-  // correct accept and autocomplete commit route through it, and the
-  // F700-F74F gate is the only thing that pulls the trigger.
   if (ie.inputType !== 'insertText' && ie.inputType !== 'insertReplacementText') {
     return;
   }
@@ -81,10 +99,6 @@ function onBeforeInput(e: Event): void {
   if (!data) return;
   if (containsLeakedFunctionKey(data)) {
     e.preventDefault();
-    console.warn('[macFunctionKeyGuard] beforeinput blocked leak', {
-      inputType: ie.inputType,
-      codepoints: [...data].map(c => c.codePointAt(0)?.toString(16)),
-    });
   }
 }
 
@@ -95,11 +109,118 @@ function onInput(e: Event): void {
     return;
   }
   if (target instanceof HTMLInputElement) {
-    // Only text-shaped inputs hold a string value of interest. Leak
-    // codepoints can't sneak into checkbox / file / range / color etc.
     if (!isTextInputType(target.type)) return;
     flushIfLeaked(target, nativeInputValueSetter);
   }
+}
+
+// We DO NOT preventDefault on keydown — caret movement, selection,
+// scroll, and React's own keydown handlers must still see the event.
+// We only schedule a post-event scrub.
+function onKeyDown(e: KeyboardEvent): void {
+  // Schedule a scrub when the keypress could plausibly leak:
+  //   - canonical function-key names (arrows, page, home, end, F-keys)
+  //   - `event.key` itself carries a leak codepoint
+  //   - Cmd/Ctrl-modified key (failed shortcuts can leak control chars
+  //     through the `keyDown:` fallback — Cmd+V on empty clipboard etc)
+  if (
+    !FUNCTION_KEY_NAMES.has(e.key)
+    && !containsLeakedFunctionKey(e.key)
+    && !e.metaKey
+    && !e.ctrlKey
+  ) {
+    return;
+  }
+  scheduleScrub();
+}
+
+function scheduleScrub(): void {
+  const gen = ++scrubGeneration;
+  const run = () => {
+    if (gen + 4 < scrubGeneration) return;
+    scrubAllInputs();
+  };
+  // 5 attempts at different timing boundaries. WebKit's silent DOM
+  // mutation has been observed at all of: next microtask, before paint
+  // (rAF), after macrotasks (setTimeout 0), and on slow JS threads up
+  // to ~120 ms later.
+  queueMicrotask(run);
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(run);
+  }
+  setTimeout(run, 0);
+  setTimeout(run, 32);
+  setTimeout(run, 120);
+}
+
+function scrubAllInputs(): void {
+  const nodes = document.querySelectorAll('textarea, input');
+  for (const el of Array.from(nodes)) {
+    if (el instanceof HTMLTextAreaElement) {
+      scrubElement(el, nativeTextareaValueSetter);
+    } else if (el instanceof HTMLInputElement && isTextInputType(el.type)) {
+      scrubElement(el, nativeInputValueSetter);
+    }
+  }
+  const active = pierceShadow(document.activeElement);
+  if (active instanceof HTMLElement && active.isContentEditable) {
+    scrubContentEditable(active);
+  }
+}
+
+function scrubElement(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  setter: ((this: HTMLInputElement | HTMLTextAreaElement, v: string) => void) | undefined,
+): void {
+  const dirty = el.value;
+  if (!containsLeakedFunctionKey(dirty)) return;
+  const clean = stripLeakedFunctionKeys(dirty);
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  const direction = el.selectionDirection || 'none';
+  if (setter) setter.call(el, clean);
+  else el.value = clean;
+  if (start !== null && end !== null) {
+    const ns = clampSelection(start, dirty, clean);
+    const ne = clampSelection(end, dirty, clean);
+    try { el.setSelectionRange(ns, ne, direction); }
+    catch { /* selection restore is best-effort */ }
+  }
+}
+
+function scrubContentEditable(root: HTMLElement): void {
+  const selection = window.getSelection?.();
+  let removed = 0;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const value = String(node.nodeValue ?? '');
+    if (containsLeakedFunctionKey(value)) {
+      const clean = stripLeakedFunctionKeys(value);
+      node.nodeValue = clean;
+      removed += value.length - clean.length;
+    }
+    node = walker.nextNode();
+  }
+  if (removed > 0 && selection) {
+    // Caret may now point past the end of a shortened text node — reset
+    // to the end of the contentEditable to keep things sane.
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(root);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch { /* ignore */ }
+  }
+}
+
+function pierceShadow(node: Element | null): Element | null {
+  let cursor: Element | null = node;
+  while (cursor && cursor.shadowRoot && cursor.shadowRoot.activeElement) {
+    cursor = cursor.shadowRoot.activeElement;
+  }
+  return cursor;
 }
 
 function flushIfLeaked(
@@ -108,31 +229,13 @@ function flushIfLeaked(
 ): void {
   const dirty = el.value;
   if (!containsLeakedFunctionKey(dirty)) return;
-
   const clean = stripLeakedFunctionKeys(dirty);
-  console.warn('[macFunctionKeyGuard] input fallback stripped leak', {
-    removed: dirty.length - clean.length,
-    codepoints: [...dirty]
-      .map(c => c.codePointAt(0) ?? 0)
-      .filter(cp => cp >= 0xf700 && cp <= 0xf74f)
-      .map(cp => cp.toString(16)),
-  });
-
-  // Save selection BEFORE writing — writing the value collapses the
-  // selection on most engines.
+  // Save selection BEFORE writing — writing the value collapses
+  // the selection on most engines.
   const start = el.selectionStart;
   const end = el.selectionEnd;
-
-  if (setter) {
-    setter.call(el, clean);
-  } else {
-    // Defensive fallback: if for any reason the prototype descriptor
-    // wasn't readable, fall back to the regular setter. React's
-    // valueTracker may then suppress the next onChange for mixed
-    // content — strictly better than leaving the leak in the DOM.
-    el.value = clean;
-  }
-
+  if (setter) setter.call(el, clean);
+  else el.value = clean;
   if (start !== null && end !== null) {
     const ns = clampSelection(start, dirty, clean);
     const ne = clampSelection(end, dirty, clean);
@@ -141,22 +244,31 @@ function flushIfLeaked(
 }
 
 function clampSelection(pos: number, dirty: string, clean: string): number {
-  // How many leak chars sat at-or-before `pos` in the dirty string?
-  // Subtract that count to map the caret to the clean-string position.
   let removed = 0;
   const limit = Math.min(pos, dirty.length);
   for (let i = 0; i < limit; i++) {
-    const cp = dirty.charCodeAt(i);
-    if (cp >= 0xf700 && cp <= 0xf74f) removed++;
+    if (isLeakedFunctionKeyCodepoint(dirty.charCodeAt(i))) removed++;
   }
-  const next = pos - removed;
-  return Math.max(0, Math.min(next, clean.length));
+  return Math.max(0, Math.min(pos - removed, clean.length));
+}
+
+function isLeakedFunctionKeyCodepoint(cp: number): boolean {
+  // NSFunctionKey range (Cocoa).
+  if (cp >= 0xf700 && cp <= 0xf74f) return true;
+  // The only legitimate C0 controls in normal text input.
+  if (cp === 0x09 || cp === 0x0a || cp === 0x0d) return false;
+  // C0 controls (U+0000-U+001F) — leak vectors include U+001C-U+001F
+  // for arrows, U+0016 SYN for Cmd+V on empty clipboard, etc.
+  if (cp <= 0x1f) return true;
+  // DEL (U+007F) and C1 controls (U+0080-U+009F) — none of these are
+  // legitimate user input; treat as leak.
+  if (cp >= 0x7f && cp <= 0x9f) return true;
+  return false;
 }
 
 function containsLeakedFunctionKey(s: string): boolean {
   for (let i = 0; i < s.length; i++) {
-    const cp = s.charCodeAt(i);
-    if (cp >= 0xf700 && cp <= 0xf74f) return true;
+    if (isLeakedFunctionKeyCodepoint(s.charCodeAt(i))) return true;
   }
   return false;
 }
@@ -164,21 +276,14 @@ function containsLeakedFunctionKey(s: string): boolean {
 function stripLeakedFunctionKeys(s: string): string {
   let out = '';
   for (let i = 0; i < s.length; i++) {
-    const cp = s.charCodeAt(i);
-    if (cp >= 0xf700 && cp <= 0xf74f) continue;
+    if (isLeakedFunctionKeyCodepoint(s.charCodeAt(i))) continue;
     out += s[i];
   }
   return out;
 }
 
 const TEXT_INPUT_TYPES = new Set([
-  '',
-  'text',
-  'search',
-  'url',
-  'tel',
-  'email',
-  'password',
+  '', 'text', 'search', 'url', 'tel', 'email', 'password',
 ]);
 
 function isTextInputType(t: string): boolean {

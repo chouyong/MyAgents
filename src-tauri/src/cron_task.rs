@@ -312,6 +312,15 @@ pub struct CronTask {
     /// Last error message (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Last run success flag — denormalized from `cron_runs/<id>.jsonl` so
+    /// `cron list` doesn't need to crack open every jsonl on every list call.
+    /// Updated by `record_execution_result()` after each tick. PRD 0.2.5 R6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_ok: Option<bool>,
+    /// Last run duration in milliseconds — same denormalization rationale as
+    /// `last_run_ok`. PRD 0.2.5 R6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_duration_ms: Option<u64>,
     // ===== IM Bot cron fields (v0.1.21) =====
     /// Source IM Bot ID that created this task
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,8 +403,15 @@ fn default_true() -> bool {
     true
 }
 
+/// Default permission_mode for new cron tasks: empty string = sentinel for
+/// "user didn't pick" → resolved to runtime max at execution time
+/// (see src/shared/types/runtime.ts::resolveCronPermissionMode).
+///
+/// Pre-v0.2.5 this returned "auto", which the cron resolver respected
+/// literally as acceptEdits — silently breaking unattended runs whenever
+/// WebSearch / Bash / mcp__* hit the human-approval queue. PRD 0.2.5 R3.
 fn default_permission_mode() -> String {
-    "auto".to_string()
+    String::new()
 }
 
 impl Default for RunMode {
@@ -438,6 +454,16 @@ pub struct CronRunRecord {
     pub duration_ms: u64,           // Execution duration
     pub content: Option<String>,    // AI output text (delivery content)
     pub error: Option<String>,      // Error message on failure
+}
+
+/// PRD 0.2.5 R4 — return shape for `trigger_now()`. Echoed back to the
+/// caller (CLI / HTTP) so they can display "what got fired, where to look".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerNowInfo {
+    pub task_id: String,
+    pub session_id: String,
+    pub dispatched_at: String,
 }
 
 /// Sanitize task_id to prevent path traversal (remove path separators and dots sequences)
@@ -680,6 +706,13 @@ fn enrich_task(mut task: CronTask) -> CronTask {
     task
 }
 
+/// Public alias for `enrich_task` used by management_api projection paths
+/// that don't go through the manager's accessor methods (e.g. echoing the
+/// just-updated task back from `update_cron_handler`). Issue #115.
+pub fn enrich_for_summary(task: CronTask) -> CronTask {
+    enrich_task(task)
+}
+
 /// Manager for cron tasks
 pub struct CronTaskManager {
     pub(crate) tasks: Arc<RwLock<HashMap<String, CronTask>>>,
@@ -708,6 +741,16 @@ impl CronTaskManager {
         // This avoids the need for block_on with async locks
         let initial_tasks = Self::load_tasks_from_file(&storage_path);
 
+        // PRD 0.2.5 cross-review I4 — run R3 migration in-memory at
+        // construction time (synchronous), so the manager is correct from
+        // the moment `get_cron_task_manager()` returns. Async migration in
+        // `initialize_cron_manager` was racy with management_api startup.
+        // The disk write is best-effort and happens lazily via the next
+        // mutation (or eagerly via initialize_cron_manager), which is fine
+        // because the migration is idempotent across restarts.
+        let mut initial_tasks = initial_tasks;
+        let migrated = Self::migrate_in_memory_legacy_auto_permission_mode(&mut initial_tasks);
+
         let task_count = initial_tasks.len();
         let manager = Self {
             tasks: Arc::new(RwLock::new(initial_tasks)),
@@ -722,8 +765,32 @@ impl CronTaskManager {
         if task_count > 0 {
             ulog_info!("[CronTask] Loaded {} tasks from disk", task_count);
         }
+        if migrated > 0 {
+            ulog_info!(
+                "[CronTask] Migrated {} task(s) in-memory: permissionMode='auto' → '' (v0.2.5 R3); will persist on next save",
+                migrated
+            );
+        }
 
         manager
+    }
+
+    /// PRD 0.2.5 cross-review I4 — sync, in-memory portion of the legacy
+    /// `permission_mode = "auto"` migration. Runs at construction time so
+    /// the manager state is correct before any async caller (management
+    /// API, scheduler) can read it. Disk persistence happens lazily.
+    /// Returns the number of migrated tasks.
+    fn migrate_in_memory_legacy_auto_permission_mode(
+        tasks: &mut HashMap<String, CronTask>,
+    ) -> usize {
+        let mut migrated = 0usize;
+        for task in tasks.values_mut() {
+            if task.permission_mode == "auto" {
+                task.permission_mode = String::new();
+                migrated += 1;
+            }
+        }
+        migrated
     }
 
     /// Load tasks from file synchronously (used during initialization)
@@ -1078,18 +1145,8 @@ impl CronTaskManager {
                     break;
                 }
 
-                // Check if task is currently executing (overlap prevention)
-                {
-                    let executing = executing_tasks.read().await;
-                    if executing.contains(&task_id_owned) {
-                        ulog_warn!("[CronTask] Task {} is still executing, skipping this interval", task_id_owned);
-                        // Short wait before checking again
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                        continue;
-                    }
-                }
-
-                // Get app handle for execution
+                // Get app handle for execution (BEFORE reserving the
+                // executing slot — if no handle, no point holding the lock).
                 let handle_opt = {
                     let handle_guard = app_handle.read().await;
                     handle_guard.clone()
@@ -1102,10 +1159,22 @@ impl CronTaskManager {
                     continue;
                 };
 
-                // Mark task as executing
-                {
+                // PRD 0.2.5 cross-review C4 — atomic check-and-insert under
+                // a single write lock. Closes the TOCTOU window where a
+                // concurrent `trigger_now` could double-fire.
+                let reserved = {
                     let mut executing = executing_tasks.write().await;
-                    executing.insert(task_id_owned.clone());
+                    if executing.contains(&task_id_owned) {
+                        false
+                    } else {
+                        executing.insert(task_id_owned.clone());
+                        true
+                    }
+                };
+                if !reserved {
+                    ulog_warn!("[CronTask] Task {} is still executing, skipping this interval", task_id_owned);
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    continue;
                 }
 
                 let is_first = task.execution_count == 0;
@@ -1155,6 +1224,19 @@ impl CronTaskManager {
                 // short-circuit uniformly without re-parsing the prefix.
                 let terminal_stop = matches!(&execution_result, Err(e) if e.starts_with(TERMINAL_STOP_SENTINEL));
 
+                // PRD 0.2.5 cross-review C5 — if the task was deleted while
+                // this tick was in flight, skip the JSONL write so we don't
+                // recreate an orphan run-history file right after
+                // `delete_task()` cleaned it up. The in-memory cleanup path
+                // below (`tasks_guard.get_mut`) already short-circuits when
+                // the task is gone, but the JSONL write happens FIRST and
+                // would resurrect the file. Check existence under the
+                // tasks lock to keep the decision atomic.
+                let task_still_alive = {
+                    let g = tasks.read().await;
+                    g.contains_key(&task_id_owned)
+                };
+
                 match &execution_result {
                     Ok((success, _, output_text, _)) => {
                         let run_record = CronRunRecord {
@@ -1176,8 +1258,12 @@ impl CronTaskManager {
                             }),
                             error: None,
                         };
-                        if let Err(e) = record_cron_run(&task_id_owned, &run_record) {
-                            ulog_warn!("[CronTask] Failed to record run: {}", e);
+                        if task_still_alive {
+                            if let Err(e) = record_cron_run(&task_id_owned, &run_record) {
+                                ulog_warn!("[CronTask] Failed to record run: {}", e);
+                            }
+                        } else {
+                            ulog_info!("[CronTask] Skip recording run for deleted task {}", task_id_owned);
                         }
                     }
                     Err(_) if terminal_stop => {
@@ -1193,7 +1279,9 @@ impl CronTaskManager {
                             content: None,
                             error: Some(e.clone()),
                         };
-                        let _ = record_cron_run(&task_id_owned, &run_record);
+                        if task_still_alive {
+                            let _ = record_cron_run(&task_id_owned, &run_record);
+                        }
                     }
                 }
 
@@ -1241,6 +1329,10 @@ impl CronTaskManager {
                                 t.last_executed_at = Some(now);
                                 t.updated_at = now;
                                 t.last_error = None;
+                                // PRD 0.2.5 R6 — denormalized last-run summary
+                                // for `cron list` (no jsonl read on list path).
+                                t.last_run_ok = Some(success);
+                                t.last_run_duration_ms = Some(duration_ms);
                                 // Track the internal SDK session ID for frontend session loading
                                 if internal_sid.is_some() {
                                     t.internal_session_id = internal_sid.clone();
@@ -1348,11 +1440,14 @@ impl CronTaskManager {
                     }
                     Err(e) => {
                         ulog_error!("[CronTask] Task {} execution failed: {}", task_id_owned, e);
-                        // Update last_error
+                        // Update last_error + denormalized last-run summary
                         {
                             let mut tasks_guard = tasks.write().await;
                             if let Some(t) = tasks_guard.get_mut(&task_id_owned) {
                                 t.last_error = Some(e.clone());
+                                // PRD 0.2.5 R6 — same denormalization as Ok path.
+                                t.last_run_ok = Some(false);
+                                t.last_run_duration_ms = Some(duration_ms);
                             }
                         }
                         // Emit error event for frontend
@@ -1472,9 +1567,262 @@ impl CronTaskManager {
         executing.contains(task_id)
     }
 
+    /// PRD 0.2.5 R9 — clone the currently-executing set in one read-lock
+    /// acquisition. Lets `list_cron_handler` mark `currently_executing`
+    /// per task without N separate `is_task_executing` calls.
+    pub async fn executing_snapshot(&self) -> HashSet<String> {
+        self.executing_tasks.read().await.clone()
+    }
+
+    /// PRD 0.2.5 (cross-review C4) — atomic check-and-insert. Returns true if
+    /// the task was successfully reserved (was NOT executing), false if it
+    /// was already executing. Caller MUST `mark_task_complete` if true is
+    /// returned, or release via `mark_task_complete` when done.
+    ///
+    /// Why: a separate `is_task_executing` then `mark_task_executing` opens
+    /// a TOCTOU window where two concurrent dispatchers (scheduler tick +
+    /// `trigger_now`, or two `trigger_now` calls) can both observe "not
+    /// executing" and both insert. This single-write-lock variant closes
+    /// the window.
+    pub async fn try_mark_task_executing(&self, task_id: &str) -> bool {
+        let mut executing = self.executing_tasks.write().await;
+        if executing.contains(task_id) {
+            return false;
+        }
+        executing.insert(task_id.to_string());
+        ulog_debug!("[CronTask] Task {} reserved as executing (atomic)", task_id);
+        true
+    }
+
     /// Save tasks to disk using atomic writes (temp file + rename)
     pub(crate) async fn save_to_disk(&self) -> Result<(), String> {
         atomic_save_tasks(&self.storage_path, &self.tasks).await
+    }
+
+    /// PRD 0.2.5 R4 — fire one immediate execution of an existing cron task
+    /// without changing its `status` / `next_execution_at` / any schedule
+    /// fields. Fire-and-forget: returns as soon as the execution is dispatched.
+    ///
+    /// Conflict semantics: if the task is currently in `executing_tasks`
+    /// (single_session running), return Err with a hint to retry later.
+    /// new_session tasks have no inherent conflict (each tick spawns a fresh
+    /// sidecar) but we still gate on `executing_tasks` for symmetry.
+    ///
+    /// Returns `(taskId, sessionId, dispatchedAtRfc3339)` for the CLI to print.
+    pub async fn trigger_now(&self, task_id: &str) -> Result<TriggerNowInfo, String> {
+        let task = self.get_task(task_id).await
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
+
+        // PRD 0.2.5 cross-review I1 — validate app_handle BEFORE reserving
+        // the executing slot. Otherwise an early Err here would leak the
+        // reservation forever (no cleanup path).
+        let handle = self.app_handle.read().await.clone()
+            .ok_or_else(|| "App handle not initialized".to_string())?;
+
+        // PRD 0.2.5 cross-review C4 — atomic check-and-reserve. Closes the
+        // TOCTOU window where a concurrent scheduler tick or another
+        // `trigger_now` call could both observe "not executing" between
+        // is_task_executing() and mark_task_executing().
+        if !self.try_mark_task_executing(task_id).await {
+            return Err(format!(
+                "Cannot run-now: a scheduled tick or earlier run-now is firing for {} this instant. \
+                 Wait for it to finish (typically <60s); see `myagents cron runs {} --limit 1` after.",
+                task_id, task_id
+            ));
+        }
+
+        let dispatched_at = Utc::now();
+        let session_id = task.session_id.clone();
+        let task_id_owned = task_id.to_string();
+        let executing_tasks = Arc::clone(&self.executing_tasks);
+        let tasks_arc = Arc::clone(&self.tasks);
+
+        // Fire-and-forget: spawn the execution off-task. The caller (CLI /
+        // HTTP handler) returns to the user the moment dispatch starts.
+        // CLAUDE.md ban on tokio::spawn — use tauri::async_runtime::spawn.
+        tauri::async_runtime::spawn(async move {
+            // Snapshot the latest task state inside the spawned task so we
+            // pick up any in-memory mutation since the trigger arrived.
+            let task_snapshot = {
+                let tasks = tasks_arc.read().await;
+                tasks.get(&task_id_owned).cloned()
+            };
+            let Some(t) = task_snapshot else {
+                ulog_warn!("[CronTask] trigger_now: task {} disappeared before dispatch", task_id_owned);
+                let mut executing = executing_tasks.write().await;
+                executing.remove(&task_id_owned);
+                return;
+            };
+
+            // PRD 0.2.5 cross-review I3 — emit execution-starting event so
+            // frontend/IM users see the same lifecycle signals as a scheduled
+            // tick (the scheduler emits this before each tick).
+            let _ = handle.emit("cron:execution-starting", serde_json::json!({
+                "taskId": task_id_owned,
+                "executionNumber": t.execution_count + 1,
+                "isFirstExecution": false,
+                "trigger": "manual",  // distinguishes from scheduler ticks
+            }));
+
+            // PRD 0.2.5 cross-review I3 — 60min timeout matches scheduler's
+            // `tokio::time::timeout(Duration::from_secs(3600), ...)`. Without
+            // this, a hung manual run would keep the task permanently
+            // reserved in `executing_tasks`.
+            let exec_start = std::time::Instant::now();
+            let timed = tokio::time::timeout(
+                Duration::from_secs(3600),
+                execute_task_directly(&handle, &t, false /* is_first_execution */),
+            ).await;
+            let duration_ms = exec_start.elapsed().as_millis() as u64;
+            let result = match timed {
+                Ok(r) => r,
+                Err(_) => {
+                    ulog_error!("[CronTask] trigger_now: task {} timed out after 60 minutes", task_id_owned);
+                    Err("Execution timed out".to_string())
+                }
+            };
+
+            // PRD 0.2.5 cross-review C5 — skip JSONL write if task was
+            // deleted while this manual run was in flight. Otherwise we'd
+            // resurrect the run-history file delete_task() just cleaned.
+            let task_still_alive = {
+                let g = tasks_arc.read().await;
+                g.contains_key(&task_id_owned)
+            };
+
+            const MAX_CONTENT_LEN: usize = 2000;
+            let terminal_stop = matches!(&result, Err(e) if e.starts_with(TERMINAL_STOP_SENTINEL));
+            match &result {
+                Ok((success, ai_exit_reason, output_text, internal_sid)) => {
+                    let run_record = CronRunRecord {
+                        ts: Utc::now().timestamp_millis(),
+                        ok: *success,
+                        duration_ms,
+                        content: output_text.as_ref().map(|t| {
+                            if t.len() > MAX_CONTENT_LEN {
+                                let end = t.char_indices()
+                                    .take_while(|(i, _)| *i < MAX_CONTENT_LEN)
+                                    .last()
+                                    .map(|(i, c)| i + c.len_utf8())
+                                    .unwrap_or(MAX_CONTENT_LEN.min(t.len()));
+                                format!("{}...", &t[..end])
+                            } else {
+                                t.clone()
+                            }
+                        }),
+                        error: None,
+                    };
+                    if task_still_alive {
+                        let _ = record_cron_run(&task_id_owned, &run_record);
+                    }
+
+                    // PRD 0.2.5 cross-review I3 — denormalize + post-process
+                    // mirror of scheduler's Ok branch (cron_task.rs ~1252-1320).
+                    let updated_execution_count = {
+                        let mut tasks_guard = tasks_arc.write().await;
+                        if let Some(t) = tasks_guard.get_mut(&task_id_owned) {
+                            t.execution_count += 1;
+                            t.last_executed_at = Some(Utc::now());
+                            t.updated_at = Utc::now();
+                            t.last_error = None;
+                            t.last_run_ok = Some(*success);
+                            t.last_run_duration_ms = Some(duration_ms);
+                            if internal_sid.is_some() {
+                                t.internal_session_id = internal_sid.clone();
+                            }
+                            t.execution_count
+                        } else {
+                            t.execution_count + 1
+                        }
+                    };
+
+                    let _ = handle.emit("cron:execution-complete", serde_json::json!({
+                        "taskId": task_id_owned,
+                        "success": success,
+                        "executionCount": updated_execution_count,
+                        "internalSessionId": internal_sid,
+                        "trigger": "manual",
+                    }));
+
+                    // IM delivery — AI output to configured channel
+                    if let Some(ref delivery) = t.delivery {
+                        let content = output_text.clone().unwrap_or_else(|| {
+                            if *success {
+                                format!("Cron task '{}' completed successfully.", t.name.as_deref().unwrap_or(&task_id_owned))
+                            } else {
+                                format!("Cron task '{}' completed with issues.", t.name.as_deref().unwrap_or(&task_id_owned))
+                            }
+                        });
+                        deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content).await;
+                    }
+
+                    // ai_exit_reason → stop the task. Even on a manual
+                    // trigger, if the AI calls ExitCronTask we honor the
+                    // request (consistent with scheduler behavior).
+                    if let Some(reason) = ai_exit_reason.clone() {
+                        ulog_info!("[CronTask] trigger_now: task {} AI requested exit: {}", task_id_owned, reason);
+                        stop_task_internal(&handle, &tasks_arc, &task_id_owned, Some(reason)).await;
+                    } else {
+                        // End condition check (deadline / max_executions)
+                        let should_stop = {
+                            let tasks_guard = tasks_arc.read().await;
+                            tasks_guard.get(&task_id_owned)
+                                .map(check_end_conditions_static)
+                                .unwrap_or(false)
+                        };
+                        if should_stop {
+                            ulog_info!("[CronTask] trigger_now: task {} reached end condition", task_id_owned);
+                            stop_task_internal(&handle, &tasks_arc, &task_id_owned, None).await;
+                        }
+                    }
+                }
+                Err(_) if terminal_stop => {
+                    // Graceful stop already executed inside execute_task_directly.
+                }
+                Err(ref e) => {
+                    let run_record = CronRunRecord {
+                        ts: Utc::now().timestamp_millis(),
+                        ok: false,
+                        duration_ms,
+                        content: None,
+                        error: Some(e.clone()),
+                    };
+                    if task_still_alive {
+                        let _ = record_cron_run(&task_id_owned, &run_record);
+                    }
+                    {
+                        let mut tasks_guard = tasks_arc.write().await;
+                        if let Some(t) = tasks_guard.get_mut(&task_id_owned) {
+                            t.last_error = Some(e.clone());
+                            t.last_run_ok = Some(false);
+                            t.last_run_duration_ms = Some(duration_ms);
+                        }
+                    }
+                    let _ = handle.emit("cron:execution-error", serde_json::json!({
+                        "taskId": task_id_owned,
+                        "error": e,
+                        "trigger": "manual",
+                    }));
+                }
+            }
+
+            // Persist updates (best-effort) via singleton.
+            if let Err(e) = get_cron_task_manager().save_to_disk().await {
+                ulog_warn!("[CronTask] trigger_now: failed to persist post-run state: {}", e);
+            }
+
+            // Release the executing lock — must run on every path.
+            let mut executing = executing_tasks.write().await;
+            executing.remove(&task_id_owned);
+
+            ulog_info!("[CronTask] trigger_now completed for task {} in {}ms", task_id_owned, duration_ms);
+        });
+
+        Ok(TriggerNowInfo {
+            task_id: task_id.to_string(),
+            session_id,
+            dispatched_at: dispatched_at.to_rfc3339(),
+        })
     }
 
     /// Create a new cron task (does not start it)
@@ -1506,6 +1854,8 @@ impl CronTaskManager {
             runtime_config: config.runtime_config,
             mcp_enabled_servers: config.mcp_enabled_servers,
             last_error: None,
+            last_run_ok: None,
+            last_run_duration_ms: None,
             source_bot_id: config.source_bot_id,
             delivery: config.delivery,
             schedule: config.schedule,
@@ -1670,17 +2020,72 @@ impl CronTaskManager {
             if schedule_val.is_null() {
                 task.schedule = None;
             } else if let Ok(s) = serde_json::from_value::<CronSchedule>(schedule_val.clone()) {
+                // Issue #115 Bug B — preserve `tz` when patch is a bare cron
+                // expression that didn't specify one. CLI's
+                // `normalizeScheduleFlag` for the bare-string form returns
+                // `{kind:cron, expr}` with no `tz` field, so this is the
+                // typical "user just wanted to change the firing pattern"
+                // intent; silently dropping the existing tz changes the
+                // meaning of the schedule from the user's local TZ to UTC.
+                //
+                // Merge rule: Cron-with-no-tz patch onto Cron-with-tz prev
+                // → inherit tz. All other transitions (Every↔Cron, explicit
+                // tz set, switch to At/Loop) replace wholesale, matching
+                // user's explicit intent.
+                let merged = match (&prev_schedule, s) {
+                    (
+                        Some(CronSchedule::Cron { tz: Some(prev_tz), .. }),
+                        CronSchedule::Cron { expr, tz: None },
+                    ) => CronSchedule::Cron { expr, tz: Some(prev_tz.clone()) },
+                    (_, other) => other,
+                };
                 // Mirror interval_minutes when switching to a fixed-interval schedule,
                 // so any downstream reader that falls back to the legacy field stays
                 // consistent.
-                if let CronSchedule::Every { minutes, .. } = &s {
+                if let CronSchedule::Every { minutes, .. } = &merged {
                     task.interval_minutes = *minutes;
                 }
-                task.schedule = Some(s);
+                task.schedule = Some(merged);
             }
         }
         if let Some(end_conditions_val) = patch.get("endConditions") {
-            if let Ok(ec) = serde_json::from_value::<EndConditions>(end_conditions_val.clone()) {
+            // Issue #115 cross-review (Pattern B) — endConditions is a
+            // nested struct with three independently-meaningful fields
+            // (deadline / max_executions / ai_can_exit). Treating the
+            // patch as a wholesale replacement silently zeroes out any
+            // field the caller didn't include — e.g. a CLI `cron update
+            // --endConditions '{"deadline":"..."}'` would lose the
+            // previously-set max_executions and ai_can_exit. Merge per
+            // field, only overwriting keys the patch actually carries.
+            if let Some(obj) = end_conditions_val.as_object() {
+                if obj.contains_key("deadline") {
+                    if let Some(v) = obj.get("deadline") {
+                        task.end_conditions.deadline = if v.is_null() {
+                            None
+                        } else {
+                            serde_json::from_value(v.clone()).unwrap_or(task.end_conditions.deadline)
+                        };
+                    }
+                }
+                if obj.contains_key("maxExecutions") {
+                    if let Some(v) = obj.get("maxExecutions") {
+                        task.end_conditions.max_executions = if v.is_null() {
+                            None
+                        } else {
+                            v.as_u64().map(|n| n as u32).or(task.end_conditions.max_executions)
+                        };
+                    }
+                }
+                if obj.contains_key("aiCanExit") {
+                    if let Some(b) = obj.get("aiCanExit").and_then(|v| v.as_bool()) {
+                        task.end_conditions.ai_can_exit = b;
+                    }
+                }
+            } else if let Ok(ec) = serde_json::from_value::<EndConditions>(end_conditions_val.clone()) {
+                // Non-object form (e.g. legacy callers passing a fully-typed
+                // struct) — fall back to wholesale replace, which is what
+                // the old behavior was. The merge above only kicks in for
+                // partial-object patches, which is the common CLI case.
                 task.end_conditions = ec;
             }
         }
@@ -1924,6 +2329,17 @@ impl CronTaskManager {
         }
 
         self.save_to_disk().await?;
+
+        // Cascade-clean the run history file. Best-effort: failure must not
+        // block delete (file may not exist if task never executed).
+        let runs_path = run_record_path(task_id);
+        if runs_path.exists() {
+            match std::fs::remove_file(&runs_path) {
+                Ok(()) => ulog_info!("[CronTask] Removed run history: {}", runs_path.display()),
+                Err(e) => ulog_warn!("[CronTask] Failed to remove run history {}: {}", runs_path.display(), e),
+            }
+        }
+
         ulog_info!("[CronTask] Deleted task: {} (was_running: {}, CronTask released)", task_id, was_running);
 
         Ok(())
@@ -3032,6 +3448,13 @@ pub async fn initialize_cron_manager(handle: AppHandle) {
     manager.set_app_handle(handle.clone()).await;
     ulog_info!("[CronTask] Manager initialized with app handle");
 
+    // PRD 0.2.5 R3 — persist the in-memory migration done at construction
+    // time (see CronTaskManager::new + migrate_in_memory_legacy_auto_permission_mode).
+    // Eagerly saving here means the migration is durable even if the app
+    // crashes before the next mutation. Idempotent: if no tasks needed
+    // migration, this is just a no-op rewrite of the same content.
+    persist_legacy_auto_migration(manager).await;
+
     // Safety-net heal: recurring/scheduled Tasks whose schedule fields
     // were wiped by an earlier migration bug can be repaired from the
     // linked CronTask, which still carries the authoritative schedule.
@@ -3048,6 +3471,31 @@ pub async fn initialize_cron_manager(handle: AppHandle) {
     // Frontend no longer needs to call recoverCronTasks
     let _ = handle.emit("cron:manager-ready", serde_json::json!({}));
     ulog_info!("[CronTask] Emitted cron:manager-ready event");
+}
+
+/// PRD 0.2.5 R3 — persist the legacy permissionMode='auto' migration that
+/// already ran in-memory at `CronTaskManager::new()` (see
+/// `migrate_in_memory_legacy_auto_permission_mode`).
+///
+/// Why split: the in-memory mutation must happen before any async caller
+/// can read tasks (management API serves concurrently with cron init).
+/// The disk persist requires async I/O, so it runs here in the async
+/// init path. Idempotent — if no tasks needed migration, save_to_disk
+/// rewrites the same content. Safe across restarts.
+async fn persist_legacy_auto_migration(manager: &CronTaskManager) {
+    // Detect whether any in-memory state actually needs persisting (i.e.,
+    // whether the construction-time pass migrated anything). We can't tell
+    // directly from the manager — but we can compare against the current
+    // disk snapshot to decide if a save is needed. Simpler: just save
+    // unconditionally. atomic_save_tasks is cheap (single file rewrite),
+    // and idempotent persistence is fine.
+    if let Err(e) = manager.save_to_disk().await {
+        ulog_warn!(
+            "[CronTask] R3 migration persist failed (in-memory state still \
+             correct; next mutation will persist): {}",
+            e
+        );
+    }
 }
 
 /// Scan every live CronTask, take a snapshot of its schedule, and offer it

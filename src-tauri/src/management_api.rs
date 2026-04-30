@@ -89,6 +89,7 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/cron/update", post(update_cron_handler))
         .route("/api/cron/delete", post(delete_cron_handler))
         .route("/api/cron/run", post(run_cron_handler))
+        .route("/api/cron/trigger", post(trigger_cron_handler))
         .route("/api/cron/runs", get(runs_cron_handler))
         .route("/api/cron/status", get(status_cron_handler))
         .route("/api/im/channels", get(list_im_channels_handler))
@@ -186,22 +187,56 @@ struct CronTaskSummary {
     execution_count: u32,
     last_executed_at: Option<String>,
     created_at: String,
+    /// Computed next-fire time (Rust enriches at read; never persisted).
+    /// PRD 0.2.5 R6 — exposed for `cron list` Next column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_execution_at: Option<String>,
+    /// Last run success flag — denormalized from `cron_runs/<id>.jsonl`.
+    /// PRD 0.2.5 R6.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_ok: Option<bool>,
+    /// Last run duration in milliseconds — same denormalization as above.
+    /// PRD 0.2.5 R6.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_duration_ms: Option<u64>,
+    /// PRD 0.2.5 R9 — transient flag: a tick (scheduled or run-now) is
+    /// firing this very instant. Distinct from `status`: a task can be
+    /// `status: Running` (scheduler enabled, not currently firing) or
+    /// `status: Running, currently_executing: true` (scheduler enabled
+    /// AND a tick is in flight). Populated by the list handler from
+    /// `executing_tasks`; not persisted. Default false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    currently_executing: bool,
 }
 
 impl From<CronTask> for CronTaskSummary {
     fn from(t: CronTask) -> Self {
+        // Status field carries the raw `TaskStatus` enum name
+        // ("Running" / "Stopped") — matches enum, persistence, Tauri IPC,
+        // and frontend. The persistent state and the transient
+        // "currently executing" state are SEPARATE concepts; the latter
+        // is surfaced via `currently_executing` populated by the list
+        // handler (PRD 0.2.5 R9 — vocabulary clarification).
         Self {
             id: t.id,
             name: t.name,
             prompt: t.prompt,
             status: serde_json::to_value(&t.status)
-                .and_then(|v| Ok(v.as_str().unwrap_or("unknown").to_string()))
-                .unwrap_or_else(|_| "unknown".to_string()),
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string()),
             schedule: t.schedule,
             interval_minutes: t.interval_minutes,
             execution_count: t.execution_count,
             last_executed_at: t.last_executed_at.map(|dt| dt.to_rfc3339()),
             created_at: t.created_at.to_rfc3339(),
+            next_execution_at: t.next_execution_at,
+            last_run_ok: t.last_run_ok,
+            last_run_duration_ms: t.last_run_duration_ms,
+            // Default false — list_cron_handler post-processes to set true
+            // for ids in the executing snapshot. Single-task projections
+            // (e.g. /api/cron/run) don't need this.
+            currently_executing: false,
         }
     }
 }
@@ -263,7 +298,11 @@ async fn create_cron_handler(
         run_mode,
         notify_enabled: true,
         tab_id: None,
-        permission_mode: req.permission_mode.unwrap_or_else(|| "auto".to_string()),
+        // PRD 0.2.5 R2/R3 — empty string is the sentinel for "user didn't pick →
+        // resolve to runtime max at execute time". Pre-v0.2.5 this field
+        // silently defaulted to "auto", which the cron resolver respects
+        // literally as acceptEdits and breaks unattended runs.
+        permission_mode: req.permission_mode.unwrap_or_default(),
         model: req.model,
         provider_env: req.provider_env,
         runtime: req.runtime,
@@ -319,21 +358,45 @@ async fn list_cron_handler(
         manager.get_all_tasks().await
     };
 
-    let summaries: Vec<CronTaskSummary> = tasks.into_iter().map(CronTaskSummary::from).collect();
+    // PRD 0.2.5 R9 — single snapshot of "currently executing" set, applied
+    // to all summaries. Avoids N separate lock acquisitions; correct for
+    // a moment-in-time read (the field is transient by design).
+    let executing = manager.executing_snapshot().await;
+    let summaries: Vec<CronTaskSummary> = tasks
+        .into_iter()
+        .map(|t| {
+            let is_executing = executing.contains(&t.id);
+            let mut summary = CronTaskSummary::from(t);
+            summary.currently_executing = is_executing;
+            summary
+        })
+        .collect();
     Json(serde_json::json!({ "ok": true, "tasks": summaries }))
 }
 
 async fn update_cron_handler(
     Json(req): Json<UpdateCronRequest>,
-) -> Json<ApiResponse> {
+) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
     match manager.update_task_fields(&req.task_id, req.patch).await {
-        Ok(_) => Json(ApiResponse { ok: true, error: None }),
-        Err(e) => Json(ApiResponse {
-            ok: false,
-            error: Some(e),
-        }),
+        Ok(updated) => {
+            // Issue #115 — return the enriched task so callers can echo
+            // the post-update `nextExecutionAt` + tz. CLI uses this to
+            // print "next fire: <local time>" right after `✓ update`,
+            // which prevents the strict-after-now confusion users hit
+            // when reading the bare UTC value in a later `cron list`.
+            let enriched = cron_task::enrich_for_summary(updated);
+            let summary = CronTaskSummary::from(enriched);
+            Json(serde_json::json!({
+                "ok": true,
+                "task": summary,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        })),
     }
 }
 
@@ -387,6 +450,41 @@ async fn run_cron_handler(
     }
 
     Json(ApiResponse { ok: true, error: None })
+}
+
+/// PRD 0.2.5 R4 — POST /api/cron/trigger
+/// Fire one immediate execution of an existing cron task without modifying
+/// its schedule or status. Fire-and-forget: returns as soon as the dispatch
+/// kicks off (does NOT wait for the AI to finish).
+async fn trigger_cron_handler(
+    Json(req): Json<TaskIdRequest>,
+) -> Json<serde_json::Value> {
+    let manager = cron_task::get_cron_task_manager();
+    match manager.trigger_now(&req.task_id).await {
+        Ok(info) => Json(serde_json::json!({
+            "ok": true,
+            "taskId": info.task_id,
+            "sessionId": info.session_id,
+            "dispatchedAt": info.dispatched_at,
+        })),
+        Err(e) => {
+            let is_conflict = e.contains("currently executing");
+            // 409 semantics for "task busy"; 404/500 fall through to the
+            // generic ApiResponse shape consumers already understand.
+            if is_conflict {
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                    "code": "task_busy",
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                }))
+            }
+        }
+    }
 }
 
 // ===== Runs / Status / Wake handlers =====
@@ -1364,7 +1462,7 @@ async fn task_run_handler(
     if ta.status != task::TaskStatus::Todo {
         return Json(serde_json::json!({
             "ok": false,
-            "error": format!("task is in state '{}'; use /api/task/rerun to re-dispatch it", ta.status.as_str())
+            "error": format!("task is in state '{}'; use 'myagents task rerun {}' to re-dispatch it", ta.status.as_str(), ta.id)
         }));
     }
 
@@ -1580,14 +1678,16 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         .map(cron_task::EndConditions::from)
         .unwrap_or_default();
     let desired_model = ta.model.clone();
-    // PRD 0.2.4 §需求 4 (4b): unset = runtime maximum permission, NOT
-    // "auto". Unattended task dispatch would otherwise block on the
-    // first tool call. The cron exec path translates `fullAgency` into
-    // the runtime-specific bypass mode.
+    // PRD 0.2.5 R2 — unset = empty sentinel; the cron exec path (Node
+    // resolveCronPermissionMode) maps that to the runtime-specific MAX
+    // mode (builtin: fullAgency, cc: bypassPermissions, codex:
+    // no-restrictions, gemini: yolo). Hardcoding "fullAgency" here was
+    // wrong for Codex/Gemini — those runtimes don't recognize
+    // "fullAgency" and fell through to interactive defaults.
     let desired_permission_mode = ta
         .permission_mode
         .clone()
-        .unwrap_or_else(|| "fullAgency".to_string());
+        .unwrap_or_default();
 
     // Candidate IDs: the Task's own cached `cron_task_id`, and any other
     // CronTask that carries this Task's id as a back-pointer (defensive —

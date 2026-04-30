@@ -5,6 +5,7 @@
 import { assertSafeFilePath } from '../utils/safe-file-path';
 import { cancellableFetch } from '../utils/cancellation';
 import { getCurrentTurnSignal } from '../utils/turn-abort';
+import { readLoopbackJson } from '../utils/loopback-response';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -70,7 +71,8 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
     timeoutMs: 30_000,
     parentSignal: getCurrentTurnSignal(),
   });
-  return resp.json();
+  // Issue #114 — defensive read via shared helper.
+  return await readLoopbackJson(resp, 'Management API');
 }
 
 // ===== Tool handler =====

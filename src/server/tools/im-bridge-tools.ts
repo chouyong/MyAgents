@@ -135,16 +135,28 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
       { headers: { 'Content-Type': 'application/json' } },
       { timeoutMs: 15_000 },
     );
-    if (!resp.ok) {
-      console.warn(`[im-bridge-tools] Failed to fetch tools: ${resp.status}`);
+    // Issue #114 horizontal — Bridge is a separate Node process; on
+    // crash/restart it can return non-JSON (HTML error page, plain text)
+    // even with status 200. Read text first, then verify content-type.
+    const bridgeBody = await resp.text();
+    const bridgeCT = resp.headers.get('content-type') ?? '';
+    if (!resp.ok || !bridgeCT.includes('application/json')) {
+      console.warn(`[im-bridge-tools] Bridge /mcp/tools ${resp.status} (ct=${bridgeCT}): ${bridgeBody.slice(0, 200)}`);
       if (myGeneration === contextGeneration) dynamicServer = null;
       return;
     }
 
-    const data = await resp.json() as {
+    let data: {
       ok: boolean;
       tools: Array<{ name: string; description: string; group: string; parameters: Record<string, unknown> }>;
     };
+    try {
+      data = JSON.parse(bridgeBody);
+    } catch {
+      console.warn(`[im-bridge-tools] Malformed JSON from /mcp/tools: ${bridgeBody.slice(0, 200)}`);
+      if (myGeneration === contextGeneration) dynamicServer = null;
+      return;
+    }
 
     if (!data.ok || !data.tools || data.tools.length === 0) {
       // Not an error — some plugins (e.g. WeChat) don't provide MCP tools.
@@ -211,7 +223,27 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
               };
             }
 
-            const result = await callResp.json() as { ok: boolean; result?: unknown; error?: string };
+            // Issue #114 horizontal — even with 2xx, Bridge may return
+            // non-JSON if the underlying plugin tool emits text. Verify
+            // content-type before parsing.
+            const callBody = await callResp.text();
+            const callCT = callResp.headers.get('content-type') ?? '';
+            if (!callCT.includes('application/json')) {
+              return {
+                content: [{ type: 'text', text: `Tool returned non-JSON response (ct=${callCT}): ${callBody.slice(0, 500)}` }],
+                isError: true,
+              };
+            }
+            let result: { ok: boolean; result?: unknown; error?: string };
+            try {
+              result = JSON.parse(callBody);
+            } catch (parseErr) {
+              const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+              return {
+                content: [{ type: 'text', text: `Tool returned malformed JSON: ${msg}\n${callBody.slice(0, 500)}` }],
+                isError: true,
+              };
+            }
             if (!result.ok) {
               // Auto-trigger OAuth for need_user_authorization (may come as Bridge-level error)
               if (result.error?.includes('need_user_authorization') && localCtx.chatId) {

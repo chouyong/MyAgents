@@ -9,6 +9,7 @@
 import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 import { cancellableFetch } from '../utils/cancellation';
 import { getCurrentTurnSignal } from '../utils/turn-abort';
+import { readLoopbackJson } from '../utils/loopback-response';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -100,7 +101,8 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
     timeoutMs: 15_000,
     parentSignal: getCurrentTurnSignal(),
   });
-  return resp.json();
+  // Issue #114 — defensive read via shared helper.
+  return await readLoopbackJson(resp, 'Management API');
 }
 
 // ===== Ownership verification =====
@@ -236,7 +238,14 @@ async function imCronToolHandler(args: {
           sessionTarget: args.job.sessionTarget ?? 'new_session',
           workspacePath: addCtx.workspacePath,
           model: addCtx.model,
-          permissionMode: addCtx.permissionMode ?? 'auto',
+          // PRD 0.2.5 R2 — cron creation context never inherits the calling
+          // session's permission. The chat tab's interactive default
+          // ('auto' = acceptEdits) is semantically wrong for unattended
+          // execution. Empty string is the sentinel for "use runtime max"
+          // resolved by Node `resolveCronPermissionMode` at execute time.
+          // Tool schema doesn't expose permission to the AI; if a deliberate
+          // override is needed, add it to the `job` schema.
+          permissionMode: '',
           providerEnv: addCtx.providerEnv,
           runtime: addCtx.runtime,
           runtimeConfig: addCtx.runtimeConfig,

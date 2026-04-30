@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.5] - 2026-05-01
+
+### Fixed
+
+- **每日定时任务卡在工具权限上（0.2.4 引入的回归）**：升级到 0.2.4 之后，原本稳跑的 cron 日报会被默认权限拦下 WebSearch / Bash / MCP 工具，AI 写"工具被拒"还被错误标成成功。修复后未主动选权限的 cron 一律给最大权限。桌面对话不受影响。老配置首次启动会自动迁移一次。
+- **删除定时任务后执行历史文件残留**：删除时会把 `cron_runs/` 里对应的 jsonl 一并清掉。
+- **`cron update` 改时区被覆盖回 UTC**：用纯表达式（如 `"30 * * * *"`）改 schedule 时不再丢失原本设的 `Asia/Shanghai`。
+- **`myagents task run` 报错指向 HTTP 路径**：错误提示改为可直接复制的 `myagents task rerun <id>`。
+- **`myagents cron start` 文档误导**：以前文案写"立即执行"实际只是恢复调度。重写说明，并新增 `run-now` 才是真的立即触发。
+- **CLI 偶发 `Unexpected token...` 错误信息**：当后端返回非 JSON 响应（参数格式错、后端异常等）时，CLI 会把真实的服务端错误文本透出来，不再变成无意义的 JSON 解析错。
+- **macOS 输入框方向键 / Cmd+V 仍偶发泄露 tofu 字符（0.2.3 没修干净）**：上版本只过滤了 NSFunctionKey 一段范围，漏掉 ANSI C0 控制字符这条隐藏路径。这次连 Cmd+V 空剪贴板触发的同款问题也一并修了。
+
+### Added
+
+- **`myagents cron run-now <id>`**：立即跑一次而不动调度 / 状态。CLI 立即返回，会话 ID 一并打出来好查。任务正在执行时拒绝重叠。
+- **`cron list` 多了几列实用信息**：下次触发时间、上次成败 ✓✗、上次耗时、总执行次数。任务此刻在跑时 ID 后会出现 `*` 标记。
+- **`cron runs` 默认折行截断 + `--full` 旗标**：长输出不再撑乱表格；要看全文加 `--full`。
+- **`cron update` 立即显示下次触发时间**：改完 schedule 后 CLI 直接打 `next fire: 2026-05-01 20:33 Asia/Shanghai (in 1m 33s)`，不用再 list 自己核。
+
+---
+
 ## [0.2.4] - 2026-04-30
 
 ### Added

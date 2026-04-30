@@ -6315,12 +6315,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     // Set session cron context so the im-cron tool can create tasks for non-IM sessions
     // IM sessions set imCronContext separately (in the IM message handler in index.ts)
+    //
+    // PRD 0.2.5 R2 — DO NOT inherit `currentPermissionMode` from the chat
+    // session. Chat tab's interactive default ('auto' = acceptEdits) is
+    // semantically wrong for unattended cron — the AI would be creating a
+    // task that needs human approval. Cron creation should always default
+    // to "" (sentinel for runtime max). Users who explicitly want a
+    // stricter mode can pass `--permissionMode plan` via the cron tool.
     if (process.env.MYAGENTS_MANAGEMENT_PORT && !getImCronContext()) {
       setSessionCronContext({
         sessionId: sessionId,
         workspacePath: agentDir,
         model: currentModel,
-        permissionMode: currentPermissionMode,
         providerEnv: currentProviderEnv,
       });
     }

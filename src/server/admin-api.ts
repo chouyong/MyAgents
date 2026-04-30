@@ -29,6 +29,7 @@ import {
   type ChannelConfigSlim,
 } from './utils/admin-config';
 import { cancellableFetch } from './utils/cancellation';
+import { readLoopbackJson } from './utils/loopback-response';
 
 // Localhost loopback timeout for management / sidecar self-calls.
 // 10s is generous for an in-process Rust handler or a same-process Hono
@@ -114,7 +115,8 @@ async function managementApi(
   }
   try {
     const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
-    return resp.json() as Promise<Record<string, unknown>>;
+    // Issue #114 — defensive read via shared helper.
+    return await readLoopbackJson(resp, 'Management API');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -151,7 +153,11 @@ async function sidecarSelf(
   }
   try {
     const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
-    const json = await resp.json() as Record<string, unknown>;
+    // Issue #114 — defensive read via shared helper. Map to this caller's
+    // legacy {status, json} shape (sidecarSelf has callers that branch on
+    // status code, so we preserve that envelope rather than collapsing to
+    // a flat error object).
+    const json = await readLoopbackJson(resp, 'Sidecar self-call');
     return { status: resp.status, json };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1527,6 +1533,24 @@ export async function handleCronStart(payload: { taskId: string }): Promise<Admi
   return wrapMgmtResponse(resp);
 }
 
+/// PRD 0.2.5 R4 — fire one immediate execution without changing schedule.
+/// Returns { taskId, sessionId, dispatchedAt } on success; { error, code } on
+/// conflict (task currently executing).
+export async function handleCronRunNow(payload: { taskId: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/trigger', 'POST', payload);
+  if (resp.ok) {
+    return {
+      success: true,
+      data: {
+        taskId: (resp as Record<string, unknown>).taskId,
+        sessionId: (resp as Record<string, unknown>).sessionId,
+        dispatchedAt: (resp as Record<string, unknown>).dispatchedAt,
+      },
+    };
+  }
+  return mgmtError(resp, 'Failed to trigger cron');
+}
+
 export async function handleCronDelete(payload: { taskId: string }): Promise<AdminResponse> {
   const resp = await managementApi('/api/cron/delete', 'POST', payload);
   return wrapMgmtResponse(resp);
@@ -1534,7 +1558,15 @@ export async function handleCronDelete(payload: { taskId: string }): Promise<Adm
 
 export async function handleCronUpdate(payload: { taskId: string; patch: Record<string, unknown> }): Promise<AdminResponse> {
   const resp = await managementApi('/api/cron/update', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  if (resp.ok) {
+    // Issue #115 — surface the post-update task summary so CLI can echo
+    // `nextExecutionAt` (computed with tz) right after `✓ update`. Avoids
+    // the "I just changed schedule, why does the next run show +1h" UX
+    // confusion that strict-after-now causes when the user re-checks
+    // later via `cron list`.
+    return { success: true, data: (resp as Record<string, unknown>).task ?? null };
+  }
+  return mgmtError(resp, 'Failed to update cron task');
 }
 
 export async function handleCronRuns(payload: { taskId: string; limit?: number }): Promise<AdminResponse> {
@@ -1975,11 +2007,39 @@ COMMANDS
   list                            List tasks in the current workspace
   status                          Totals + next execution time
   add OPTIONS                     Create a new task
-  start <taskId>                  Trigger a task for immediate execution
+  start <taskId>                  Enable scheduled task (resume from stopped).
+                                  Does NOT trigger immediate execution — use
+                                  'cron run-now <taskId>' for that.
+  run-now <taskId>                Fire one execution immediately without
+                                  changing the task's schedule or status.
   stop <taskId>                   Pause a running task
   remove <taskId>                 Delete a task
   update <taskId> OPTIONS         Change name / prompt / schedule
-  runs <taskId> [--limit N]       Show recent execution records
+  runs <taskId> [--limit N]       Show recent execution records (output
+                                  truncated to 80 chars per row; pass --full
+                                  for untruncated output)
+
+STATUS VOCABULARY (in 'list' / 'status' output and --json)
+  Two ORTHOGONAL concepts. Don't confuse them.
+
+  status field — the persistent scheduler state:
+    Running    Scheduler is enabled. The task fires at its next scheduled
+               time (see the 'Next' column). NOT the same as "currently
+               executing" — see currentlyExecuting below.
+    Stopped    Scheduler is disabled. The task never fires while in this
+               state, even when the schedule expression matches. Resume
+               with 'cron start <taskId>'.
+
+  currentlyExecuting field (--json) / '*' marker after the ID (plain text):
+    A tick is firing this very instant — either a scheduled fire or a
+    'cron run-now' invocation. Calling 'cron run-now' on a task whose
+    marker is showing returns a busy error.
+
+  status=Running  +  no '*' marker     →  scheduled, not firing right now
+  status=Running  +  '*' marker        →  scheduled AND firing this instant
+  status=Stopped  +  no '*' marker     →  disabled, not firing
+  status=Stopped  +  '*' marker        →  rare; a scheduled tick was already
+                                          in flight when the task got stopped
 
 CREATE OPTIONS (myagents cron add ...)
   --name <text>                   Human-readable label (optional)
