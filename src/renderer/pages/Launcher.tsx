@@ -19,7 +19,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -37,7 +37,7 @@ import type { SessionMetadata } from '@/api/sessionClient';
 import type { InitialMessage } from '@/types/tab';
 
 interface LauncherProps {
-    onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
+    onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage) => void;
     isStarting?: boolean;
     startError?: string | null;
     isActive?: boolean;
@@ -375,13 +375,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
         setLaunchingProjectId(selectedWorkspace.id);
         touchProject(selectedWorkspace.id).catch(() => {});
-        // launcherProvider may be undefined if no provider has valid credentials —
-        // fall back to the first provider in the list so the chat can still open
-        // (provider selector in SimpleChatInput will show the setup guidance)
-        const effectiveProvider = launcherProvider ?? providers[0];
-        if (!effectiveProvider) return; // No providers at all (shouldn't happen — PRESET_PROVIDERS always exists)
-        onLaunchProject(selectedWorkspace, effectiveProvider, undefined, initialMessage);
-    }, [selectedWorkspace, launcherProvider, providers, launcherPermissionMode,
+        onLaunchProject(selectedWorkspace, undefined, initialMessage);
+    }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         isExternalRuntime, touchProject, onLaunchProject, updateConfig]);
 
@@ -392,22 +387,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
     const handleLaunch = useCallback((project: Project, sessionId?: string) => {
         setLaunchingProjectId(project.id);
-        const providerId = project.providerId ?? config.defaultProviderId;
-        const provider = resolveProvider(providerId, providers, apiKeys, providerVerifyStatus);
-        if (!provider) {
-            // No available provider — let the launch proceed anyway; Chat will show empty state
-            const fallback = providers.find(p => p.id === providerId) ?? providers[0];
-            if (fallback) {
-                onLaunchProject(project, fallback, sessionId);
-            }
-            return;
-        }
         // Update lastOpened timestamp (async, don't block launch)
         touchProject(project.id).catch((err) => {
             console.warn('[Launcher] Failed to update lastOpened:', err);
         });
-        onLaunchProject(project, provider, sessionId);
-    }, [config.defaultProviderId, providers, apiKeys, providerVerifyStatus, touchProject, onLaunchProject]);
+        onLaunchProject(project, sessionId);
+    }, [touchProject, onLaunchProject]);
 
     const handleOpenTask = useCallback((session: SessionMetadata, project: Project) => {
         handleLaunch(project, session.id);
@@ -551,7 +536,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
         };
-        onLaunchProject(project, effectiveProvider, undefined, initialMessage);
+        onLaunchProject(project, undefined, initialMessage);
     }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject]);
 
     return (

@@ -503,12 +503,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             `请帮助用户安装 \`${command}\`，安装完成后告知用户回到设置页面重新启用 MCP 服务。`,
         ].join('\n');
 
-        const availableProvider = providers.find(p => p.models.length > 0 && isProviderAvailable(p, apiKeys, providerVerifyStatus));
-
+        // Don't pass providerId/model — the LAUNCH_BUG_REPORT handler will fall through
+        // to the helper Agent's persisted (providerId, model), matching the user's
+        // intent that "summon helper" always opens with the helper Agent's workspace
+        // settings, not whatever provider this dialog could find first.
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
-            detail: { description: prompt, providerId: availableProvider?.id, appVersion },
+            detail: { description: prompt, appVersion },
         }));
-    }, [runtimeDialog, appVersion, providers, apiKeys, providerVerifyStatus]);
+    }, [runtimeDialog, appVersion]);
 
     // Track which MCP servers need configuration (missing required fields)
     const [mcpNeedsConfig, setMcpNeedsConfig] = useState<Record<string, boolean>>({});

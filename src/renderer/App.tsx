@@ -22,7 +22,6 @@ import Settings from '@/pages/Settings';
 import TaskCenter from '@/pages/TaskCenter';
 import {
   type Project,
-  type Provider,
 } from '@/config/types';
 import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
@@ -36,7 +35,7 @@ import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/fron
 import { normalizeRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
-import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection } from '@/config/configService';
+import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { RuntimeType } from '../shared/types/runtime';
@@ -90,7 +89,7 @@ interface TabContentProps {
   settingsInitialMcpId: string | undefined;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
-  onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
+  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage) => void;
   // Chat callbacks
   onBack: () => Promise<void>;
   onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
@@ -229,9 +228,11 @@ export default function App() {
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
-  // Helper Agent's persisted model defaults — used by BugReportOverlay (initial
-  // picker selection + persist on pick) and by the LAUNCH_BUG_REPORT handler
-  // (fallback when callers, e.g. Chat error banner, don't pre-select a model).
+  // Helper Agent's persisted model defaults — used by BugReportOverlay for
+  // initial picker selection + persist on pick. The LAUNCH_BUG_REPORT handler
+  // intentionally does NOT read this: when no explicit hint is supplied, the
+  // helper Tab autoSend resolves provider/model via currentAgent (= helper
+  // Agent) — same path as opening ~/.myagents from the Launcher.
   const helperAgentDefaults = useHelperAgentModelDefaults();
 
   // Apply theme (light/dark/system) to <html> element
@@ -275,9 +276,6 @@ export default function App() {
 
   const configProjectsRef = useRef(configProjects);
   configProjectsRef.current = configProjects;
-
-  const helperAgentDefaultsRef = useRef(helperAgentDefaults);
-  helperAgentDefaultsRef.current = helperAgentDefaults;
 
   // Ref for full AppConfig — needed by session-switch flow (T12) to resolve per-workspace
   // agent.runtime for cross-runtime detection without putting `config` into the
@@ -810,7 +808,6 @@ export default function App() {
    */
   const handleLaunchProject = useCallback(async (
     project: Project,
-    _provider: Provider,
     sessionId?: string,
     initialMessage?: InitialMessage
   ) => {
@@ -1806,7 +1803,6 @@ export default function App() {
           toastRef.current?.error('未配置可用模型供应商，无法开始 AI 讨论');
           return;
         }
-        const provider = sel.provider;
 
         // Pre-mint the alignment session id (CC review W8) so the AI doesn't
         // have to infer a placeholder. This becomes the subdir under
@@ -1894,7 +1890,6 @@ export default function App() {
 
         await handleLaunchProject(
           workspace,
-          provider,
           undefined,
           initialMessage,
         );
@@ -1946,17 +1941,6 @@ export default function App() {
         return;
       }
 
-      const providerId =
-        workspace.providerId ?? configRef.current?.defaultProviderId ?? null;
-      const provider =
-        (providerId
-          ? appProvidersRef.current.find((p) => p.id === providerId)
-          : undefined) ?? appProvidersRef.current[0];
-      if (!provider) {
-        toastRef.current?.error('未配置模型供应商，无法打开 session');
-        return;
-      }
-
       if (tabsRef.current.length >= MAX_TABS) {
         toastRef.current?.error(`已达 Tab 上限 (${MAX_TABS})，请先关闭一个 Tab`);
         return;
@@ -1978,7 +1962,7 @@ export default function App() {
       activeTabIdRef.current = newTab.id;
 
       try {
-        await handleLaunchProject(workspace, provider, sessionId);
+        await handleLaunchProject(workspace, sessionId);
       } catch (err) {
         console.error('[App] OPEN_SESSION_IN_NEW_TAB failed:', err);
         toastRef.current?.error('打开 session 失败，请稍后重试');
@@ -2021,34 +2005,8 @@ export default function App() {
       appVersion: string;
       images?: ImageAttachment[];
     }>) => {
-      const { description, appVersion } = event.detail;
+      const { description, appVersion, providerId, model } = event.detail;
       try {
-        // --- Pre-checks (before any Tab mutation) ---
-
-        // Resolve provider+model with this priority:
-        //   1. Caller-supplied (e.g. BugReportOverlay model picker).
-        //   2. Helper Agent's persisted default (if its provider is still
-        //      registered) — keeps Chat error-banner quick-launch and overlay
-        //      submissions consistent with the same default model.
-        //   3. First registered provider (fallback when helper never set one).
-        const helperDefaults = helperAgentDefaultsRef.current;
-        let providerId = event.detail.providerId;
-        let model = event.detail.model;
-        if (!providerId && helperDefaults.initialProviderId) {
-          const helperProvider = appProvidersRef.current.find(p => p.id === helperDefaults.initialProviderId);
-          if (helperProvider) {
-            providerId = helperProvider.id;
-            if (!model) model = helperDefaults.initialModel;
-          }
-        }
-        const provider = providerId
-          ? appProvidersRef.current.find(p => p.id === providerId)
-          : appProvidersRef.current[0];
-        if (!provider) {
-          console.error('[App] No providers available for bug report');
-          return;
-        }
-
         if (tabsRef.current.length >= MAX_TABS) {
           console.warn(`[App] Max tabs (${MAX_TABS}) reached, cannot open bug report`);
           return;
@@ -2066,14 +2024,33 @@ export default function App() {
           return;
         }
 
-        // --- All checks passed, safe to create Tab ---
+        // Two paths, no third:
+        //   A. Explicit picker (BugReportOverlay): caller supplied (providerId, model)
+        //      from the model picker. Honor it via pairBuiltinSelection (model ∈
+        //      provider.models invariant). The picker also persists the same pair
+        //      back into helper Agent via useHelperAgentModelDefaults, so future
+        //      launches pick it up via path B.
+        //   B. Implicit (Chat error banner / Settings mcp dialog): no hint passed.
+        //      Don't fabricate a builtinSelection here — let Chat tab autoSend
+        //      fall through to currentAgent = helper Agent's persisted
+        //      providerId/model. This matches "open ~/.myagents from Launcher".
+        let builtinSelection: { providerId: string; model: string } | undefined;
+        if (providerId) {
+          const provider = appProvidersRef.current.find(p => p.id === providerId);
+          if (provider && isProviderAvailable(
+            provider,
+            appApiKeysRef.current,
+            appProviderVerifyStatusRef.current,
+          )) {
+            builtinSelection = pairBuiltinSelection(provider, model);
+          }
+          // else: requested provider is gone / unavailable → drop hint, fall
+          // through to helper Agent default (path B).
+        }
 
-        // PRD 0.2.3 + cross-review: helper agent 走 builtin runtime；通过 pairBuiltinSelection
-        // 在已知 provider 时强制 model ∈ provider.models（否则降级到 primaryModel）。
-        // event.detail.model 来自 CustomEvent，可能是另一 provider 的 model 或已删除 model。
         const initialMessage: InitialMessage = {
           text: buildSupportPrompt(description, appVersion),
-          builtinSelection: pairBuiltinSelection(provider, model),
+          ...(builtinSelection ? { builtinSelection } : {}),
           images: event.detail.images,
         };
 
@@ -2082,7 +2059,7 @@ export default function App() {
         setActiveTabId(newTab.id);
         activeTabIdRef.current = newTab.id;
 
-        await handleLaunchProject(project, provider, undefined, initialMessage);
+        await handleLaunchProject(project, undefined, initialMessage);
 
         // Override tab title
         setTabs((prev) =>
