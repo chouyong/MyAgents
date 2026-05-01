@@ -148,44 +148,50 @@ export default function SettingsHelperInbox({
             <h2 className="mb-4 text-lg font-semibold text-[var(--ink)]">
                 AI 小助理
             </h2>
+            {/* Container has no padding — textarea zone and toolbar zone
+                each carry their own. This keeps the toolbar's vertical
+                padding symmetric (py-2) so the buttons sit centered in the
+                toolbar row instead of hugging the divider. */}
             <div
-                className={`relative rounded-[var(--radius-xl)] bg-[var(--paper-elevated)] p-5 shadow-xs transition-shadow duration-150 hover:shadow-sm focus-within:shadow-sm ${
+                className={`relative overflow-hidden rounded-[var(--radius-xl)] bg-[var(--paper-elevated)] shadow-xs transition-shadow duration-150 hover:shadow-sm focus-within:shadow-sm ${
                     isDragging ? 'ring-2 ring-[var(--accent-warm)]/40' : ''
                 } ${isSending ? 'pointer-events-none opacity-70' : ''}`}
                 {...dragHandlers}
             >
-                <textarea
-                    value={text}
-                    onChange={(e) => setText(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    onPaste={pasteHandler}
-                    placeholder={PLACEHOLDER}
-                    rows={4}
-                    className="w-full resize-none overflow-y-auto border-0 bg-transparent text-[var(--text-base)] leading-[1.6] text-[var(--ink)] caret-[var(--accent-warm)] placeholder:text-[var(--ink-muted)] focus:outline-none"
-                    style={{ maxHeight: 'calc(8 * 1.6 * var(--text-base))' }}
-                />
+                <div className="px-5 pt-5 pb-3">
+                    <textarea
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        onPaste={pasteHandler}
+                        placeholder={PLACEHOLDER}
+                        rows={4}
+                        className="w-full resize-none overflow-y-auto border-0 bg-transparent text-[var(--text-base)] leading-[1.6] text-[var(--ink)] caret-[var(--accent-warm)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+                        style={{ maxHeight: 'calc(8 * 1.6 * var(--text-base))' }}
+                    />
 
-                {images.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                        {images.map((img) => (
-                            <div key={img.id} className="group/thumb relative">
-                                <img
-                                    src={img.preview}
-                                    alt="attachment"
-                                    className="h-16 w-16 cursor-pointer rounded-[var(--radius-md)] object-cover"
-                                    onDoubleClick={() => openPreview(img.preview, img.file.name)}
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => removeAt(img.id)}
-                                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--ink)]/70 text-white opacity-0 transition-all hover:bg-[var(--ink)] group-hover/thumb:opacity-100"
-                                >
-                                    <X className="h-3 w-3" />
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                )}
+                    {images.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            {images.map((img) => (
+                                <div key={img.id} className="group/thumb relative">
+                                    <img
+                                        src={img.preview}
+                                        alt="attachment"
+                                        className="h-16 w-16 cursor-pointer rounded-[var(--radius-md)] object-cover"
+                                        onDoubleClick={() => openPreview(img.preview, img.file.name)}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => removeAt(img.id)}
+                                        className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--ink)]/70 text-white opacity-0 transition-all hover:bg-[var(--ink)] group-hover/thumb:opacity-100"
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
 
                 <input
                     ref={fileInputRef}
@@ -199,7 +205,7 @@ export default function SettingsHelperInbox({
                     }}
                 />
 
-                <div className="mt-3 flex items-center justify-between border-t border-[var(--line-subtle)] pt-2">
+                <div className="flex items-center justify-between border-t border-[var(--line-subtle)] px-5 py-2">
                     <div className="flex items-center gap-1">
                         <button
                             type="button"
@@ -237,7 +243,6 @@ export default function SettingsHelperInbox({
                             <Send className="h-3.5 w-3.5" />
                         )}
                         发送
-                        <kbd className="ml-1 font-mono text-[10px] opacity-70">⌘⏎</kbd>
                     </button>
                 </div>
             </div>
