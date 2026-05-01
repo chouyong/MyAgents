@@ -1440,12 +1440,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       patchProject,
       patchAgentConfig,
       patchSnapshot: isOwnedSession ? patchSnapshot : undefined,
+      // Cross-review: Chat's MCP toggle previously did its own
+      // `apiPost('/api/mcp/set')` AFTER the helper, leaving the helper's
+      // `pushMcpToSidecar` plumbing dead-code. Wire it through so the
+      // "single source of truth" promise is real.
+      pushMcpToSidecar: async (servers) => {
+        await apiPost('/api/mcp/set', { servers });
+      },
+      getAllMcpServers,
+      getGlobalMcpEnabled: getEnabledMcpServerIds,
     });
     if (!result.ok) {
       console.error('[chat] tab config dual-write failed:', result.errors);
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
   }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
@@ -1461,21 +1470,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     setWorkspaceMcpEnabled(newEnabled);
 
+    // PRD 0.2.7: persistTabConfigChange now also handles the sidecar push
+    // (via the helper's `pushMcpToSidecar` callback) so this site is just a
+    // single delegate call — disk dual-write + live MCP swap on the running
+    // session in one transaction. Pre-PRD-0.2.7 the duplicate `apiPost`
+    // here ran AFTER persist and left the helper's plumbing as dead code.
     void persistTabConfigChange({ mcpEnabledServers: newEnabled });
-
-    // Get the effective MCP servers and send to backend
-    const effectiveServers = mcpServers.filter(s =>
-      globalMcpEnabled.includes(s.id) && newEnabled.includes(s.id)
-    );
-
-    try {
-      await apiPost('/api/mcp/set', { servers: effectiveServers });
-      console.log('[Chat] MCP servers synced:', effectiveServers.map(s => s.id));
-    } catch (err) {
-      console.error('[Chat] Failed to sync MCP servers:', err);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
-  }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled, isOwnedSession, patchSnapshot]);
+  }, [workspaceMcpEnabled, persistTabConfigChange]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);

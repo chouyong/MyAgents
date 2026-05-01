@@ -56,33 +56,38 @@ fn default_true() -> bool {
 /// Each entry in `source_paths` is treated independently — a single failure
 /// does not abort the rest, mirroring the sidecar's "best effort" semantics
 /// for drag-drop UX.
+///
+/// Tauri auto-converts JS-side camelCase (`sourcePaths`/`targetDir`/`autoRename`)
+/// to Rust snake_case parameter names — match the convention used by every
+/// other command in this codebase.
 #[tauri::command]
-#[allow(non_snake_case)]
 pub async fn cmd_workspace_copy_paths(
     workspace: String,
-    sourcePaths: Vec<String>,
-    targetDir: String,
-    autoRename: Option<bool>,
+    source_paths: Vec<String>,
+    target_dir: String,
+    auto_rename: Option<bool>,
 ) -> Result<CopyResult, String> {
-    if sourcePaths.is_empty() {
+    if source_paths.is_empty() {
         return Err("sourcePaths is required".to_string());
     }
 
     let workspace_root = validate_workspace_root(&workspace)?;
-    let target_root = resolve_inside_workspace(&workspace_root, &targetDir)?;
+    let target_root = resolve_inside_workspace(&workspace_root, &target_dir)?;
     fs::create_dir_all(&target_root)
         .map_err(|e| format!("Failed to create target directory: {}", e))?;
 
-    let auto_rename = autoRename.unwrap_or(true);
-    let mut copied: Vec<CopiedFile> = Vec::with_capacity(sourcePaths.len());
+    let auto_rename = auto_rename.unwrap_or(true);
+    let mut copied: Vec<CopiedFile> = Vec::with_capacity(source_paths.len());
 
-    for source in sourcePaths {
+    for source in source_paths {
         match copy_one_path(&source, &target_root, &workspace_root, auto_rename) {
             Ok(item) => copied.push(item),
             Err(err) => {
                 // Per-file failures get logged; the batch continues so the
                 // user keeps the files that did go through.
-                log::warn!("[workspace_files::copy] skipping {}: {}", source, err);
+                // ulog_* (not log::*) per CLAUDE.md red-line — log::warn!
+                // doesn't reach `~/.myagents/logs/unified-{date}.log`.
+                crate::ulog_warn!("[workspace_files::copy] skipping {}: {}", source, err);
             }
         }
     }

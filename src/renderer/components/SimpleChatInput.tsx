@@ -1011,10 +1011,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     clearWorkspaceBoundDraft: () => {
       // Match `@<path>` tokens that target the workspace-managed `myagents_files/`
       // upload directory. Plain typed `@something` (not workspace-tied) survives.
-      // Trailing whitespace after the token is also consumed so we don't leave
-      // double spaces / orphan whitespace at the cursor position.
+      // Trailing whitespace after the token is also consumed (`\s*`) so a
+      // sequence like "@myagents_files/foo.pdf  " collapses fully — the
+      // earlier `\s?` left a stray space behind in the multi-space case.
       const current = inputValueRef.current;
-      const pattern = /@myagents_files\/[^\s]+\s?/g;
+      const pattern = /@myagents_files\/[^\s]+\s*/g;
       const stripped = current.replace(pattern, '');
       const strippedCount = (current.match(pattern) ?? []).length;
       if (strippedCount > 0) {

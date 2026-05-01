@@ -240,10 +240,12 @@ export default memo(function BrandSection({
 
     // PRD 0.2.7 D3: switching workspaces in the launcher invalidates any
     // workspace-bound draft state — `@myagents_files/...` references point to
-    // files in the previous workspace's `myagents_files/`, and `images[]`
+    // files in the previous workspace's `myagents_files/`, `images[]`
     // captured via Tauri drag-drop / copyPaths similarly belong to the prior
-    // tree. Strip them silently and surface a toast so the user knows what
-    // changed (text outside the references survives, so this is a soft reset).
+    // tree, and a staged cron task that referenced those files would now
+    // execute against an inconsistent prompt. Strip them silently and surface
+    // a toast (text outside references survives, so this is a soft reset).
+    // Cross-review (CC) caught the stagedCron-not-cleared subtle UX trap.
     const lastWorkspacePathRef = useRef<string | null>(selectedProject?.path ?? null);
     useEffect(() => {
         const next = selectedProject?.path ?? null;
@@ -252,11 +254,14 @@ export default memo(function BrandSection({
         if (lastWorkspacePathRef.current !== null) {
             const result = inputRef.current?.clearWorkspaceBoundDraft();
             const total = (result?.strippedReferences ?? 0) + (result?.clearedImages ?? 0);
-            if (total > 0) {
+            const hadCron = stagedCron !== null;
+            if (hadCron) setStagedCron(null);
+            if (total > 0 || hadCron) {
                 toastRef.current.info('已切换工作区，已清理上一工作区的附件草稿');
             }
         }
         lastWorkspacePathRef.current = next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stagedCron read intentionally; we don't want this effect to re-fire when the user merely stages a new cron, only when workspace changes
     }, [selectedProject?.path]);
 
     // Task-mode submit is a straight pass-through to the parent's `onSend`.

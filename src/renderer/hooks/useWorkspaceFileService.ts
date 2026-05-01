@@ -15,7 +15,7 @@
 //   - No React state lives in here; stable reference identity comes from
 //     useCallback so consumers can put it in effect deps without churn.
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 
 import { isTauriEnvironment } from '@/utils/browserMock';
 
@@ -205,15 +205,34 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
-  return {
-    importBase64Files,
-    copyPaths,
-    readPathsAsBase64,
-    addGitignore,
-    searchFiles,
-    deleteFile,
-    listSlashCommands,
-    isAvailable: tauri && workspacePath != null,
-    workspacePath,
-  };
+  // Wrap the returned object in useMemo so consumers that put `fileService`
+  // in `useCallback` deps (e.g. SimpleChatInput's processDroppedFiles,
+  // searchFiles, fetchCommands — ~10 sites) don't rebuild on every keystroke.
+  // Pre-PRD-0.2.7 the legacy `apiPost`/`apiGet` came from a stable Tab context;
+  // this useMemo restores that render-loop stability.
+  const isAvailable = tauri && workspacePath != null;
+  return useMemo(
+    () => ({
+      importBase64Files,
+      copyPaths,
+      readPathsAsBase64,
+      addGitignore,
+      searchFiles,
+      deleteFile,
+      listSlashCommands,
+      isAvailable,
+      workspacePath,
+    }),
+    [
+      importBase64Files,
+      copyPaths,
+      readPathsAsBase64,
+      addGitignore,
+      searchFiles,
+      deleteFile,
+      listSlashCommands,
+      isAvailable,
+      workspacePath,
+    ],
+  );
 }

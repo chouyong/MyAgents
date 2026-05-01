@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::path_safety::validate_external_read_path;
+
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "压缩对话历史，释放上下文空间"),
     ("context", "显示或管理当前上下文"),
@@ -91,9 +93,17 @@ pub async fn cmd_list_slash_commands(
     workspace: String,
 ) -> Result<SlashCommandsResponse, String> {
     // workspace may not exist yet (e.g. brand-new workspace selected in the
-    // launcher before any chat has touched it). Don't error — just skip the
-    // project-level scan in that case.
-    let workspace_root = PathBuf::from(&workspace);
+    // launcher before any chat has touched it), but it MUST still pass the
+    // system-directory blacklist — otherwise a caller passing `/etc` or
+    // `~/.ssh` could probe directory existence via this read-only scan. We
+    // use `validate_external_read_path` (path traversal + blacklist only,
+    // no existence requirement) instead of `validate_workspace_root` (which
+    // requires the dir to exist). Empty string is treated as "no scan".
+    let workspace_root = if workspace.is_empty() {
+        PathBuf::new()
+    } else {
+        validate_external_read_path(&workspace)?
+    };
     let workspace_exists = workspace_root.is_dir();
 
     let home_dir = dirs::home_dir().ok_or_else(|| "home dir unavailable".to_string())?;
@@ -235,8 +245,13 @@ fn scan_skills_dir(
         let folder_name = entry.file_name().to_string_lossy().to_string();
         let folder_path = entry.path();
 
-        // Follow symlinks / Windows junctions when checking if it's a dir
-        // (matches sidecar `isDirEntry` behavior — issue #104).
+        // Read-only scan — follow symlinks / Windows junctions to detect
+        // dir-likeness so user-installed skills mounted via junction surface.
+        // For a broken symlink, `metadata()` returns Err and we just skip;
+        // the v0.2.5 cpSync crash mode (CLAUDE.md red-line) doesn't apply
+        // here because we never write through this path. Issue #104 was
+        // about the sidecar's parallel `isDirEntry` helper supporting the
+        // same junction-mounted case.
         let is_dir_like = std::fs::metadata(&folder_path)
             .map(|m| m.is_dir())
             .unwrap_or(false);

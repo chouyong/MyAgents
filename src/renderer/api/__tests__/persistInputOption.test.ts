@@ -99,6 +99,40 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
+  it('writes runtimeModel to session snapshot when external (cross-review fix)', async () => {
+    // Regression check: the helper used to skip snapshot.model for external
+    // runtimes entirely, dropping `handleRuntimeModelChange`'s update on the
+    // floor. Cross-review (CC perspective) caught this; the fix routes
+    // runtimeModel into snapshot.model when isExternalRuntime is true.
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      fields: { runtimeModel: 'sonnet' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({ model: 'sonnet' });
+  });
+
+  it('does NOT write builtinModel to snapshot when on external runtime', async () => {
+    // Symmetric guard: a stale builtinModel sneaking through (e.g. caller
+    // passes both fields by accident) must not pollute snapshot.model.
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      fields: { builtinModel: 'deepseek-chat', runtimeModel: 'sonnet' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({ model: 'sonnet' });
+  });
+
   it('writes mcpEnabledServers to project + agent + snapshot', async () => {
     const m = makeMocks();
     await persistInputOptionChange({

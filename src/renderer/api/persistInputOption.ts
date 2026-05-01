@@ -193,7 +193,18 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   const { fields, isExternalRuntime } = params;
 
   if (fields.providerId !== undefined) patch.providerId = fields.providerId;
-  if (fields.builtinModel !== undefined) patch.model = fields.builtinModel;
+  // Snapshot.model is the session's "current model" regardless of runtime —
+  // pre-PRD-0.2.7 Chat persisted to it via the unified `model` field. Now
+  // that callers split by runtime, we have to write whichever one applies
+  // for the current runtime; otherwise external-runtime model changes (e.g.
+  // `handleRuntimeModelChange`) silently bypass the snapshot and consumers
+  // reading `snapshot.model` (sidecar restore, IM bot bridge) see stale
+  // builtin values.
+  if (isExternalRuntime) {
+    if (fields.runtimeModel !== undefined) patch.model = fields.runtimeModel;
+  } else if (fields.builtinModel !== undefined) {
+    patch.model = fields.builtinModel;
+  }
   if (fields.permissionMode !== undefined && !isExternalRuntime) {
     patch.permissionMode = fields.permissionMode;
   }

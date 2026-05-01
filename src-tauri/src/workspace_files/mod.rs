@@ -32,11 +32,8 @@ pub mod transfer;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-// Re-export the Tauri commands so `lib.rs` can register them with one
-// `generate_handler!` line per module rather than reaching into each file.
-pub use delete::cmd_workspace_delete;
-pub use files_b64::{cmd_workspace_import_files_b64, cmd_workspace_read_files_b64};
-pub use gitignore::cmd_workspace_add_gitignore;
-pub use search::cmd_workspace_search_files_fuzzy;
-pub use slash::cmd_list_slash_commands;
-pub use transfer::cmd_workspace_copy_paths;
+// `lib.rs` registers each command with the FULL submodule path
+// (e.g. `workspace_files::files_b64::cmd_workspace_import_files_b64`) because
+// `tauri::generate_handler!` looks up auto-generated `__cmd__<name>` wrappers
+// in the same module that defined the command. Re-exporting at this level
+// would NOT bring the wrapper along, so we deliberately don't.

@@ -66,11 +66,15 @@ pub struct ImportResult {
 ///
 /// `target_dir` is workspace-relative (e.g. `"myagents_files"`). Empty string
 /// means workspace root itself. The directory is created if it does not exist.
+///
+/// Tauri auto-converts the JS-side camelCase (`targetDir`) to the Rust-side
+/// snake_case parameter name (`target_dir`); the frontend hook keeps sending
+/// camelCase for consistency with `serde(rename_all = "camelCase")` JSON.
 #[tauri::command]
 pub async fn cmd_workspace_import_files_b64(
     workspace: String,
     files: Vec<Base64FileEntry>,
-    #[allow(non_snake_case)] targetDir: Option<String>,
+    target_dir: Option<String>,
 ) -> Result<ImportResult, String> {
     if files.is_empty() {
         return Err("No files provided".to_string());
@@ -79,7 +83,7 @@ pub async fn cmd_workspace_import_files_b64(
     let workspace_root = validate_workspace_root(&workspace)?;
     let target_root = resolve_inside_workspace(
         &workspace_root,
-        targetDir.as_deref().unwrap_or(""),
+        target_dir.as_deref().unwrap_or(""),
     )?;
 
     tokio::fs::create_dir_all(&target_root)
