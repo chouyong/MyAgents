@@ -59,13 +59,14 @@ import {
     UNLOCK_CONFIG,
 } from '@/utils/developerMode';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { CUSTOM_EVENTS } from '../../shared/constants';
+import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { getPlatform } from '@/analytics/device';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { LogEntry } from '@/types/log';
 import BugReportOverlay from '@/components/BugReportOverlay';
+import SettingsHelperInbox from '@/components/SettingsHelperInbox';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
 function parsePositiveInt(value: string): number | undefined {
@@ -503,13 +504,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             `请帮助用户安装 \`${command}\`，安装完成后告知用户回到设置页面重新启用 MCP 服务。`,
         ].join('\n');
 
-        // Don't pass providerId/model — the LAUNCH_BUG_REPORT handler will fall through
-        // to the helper Agent's persisted (providerId, model), matching the user's
-        // intent that "summon helper" always opens with the helper Agent's workspace
-        // settings, not whatever provider this dialog could find first.
-        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
-            detail: { description: prompt, appVersion },
-        }));
+        // Don't pass providerId/model — the LAUNCH_BUG_REPORT handler will fall
+        // through to the helper Agent's persisted (providerId, model), matching
+        // the user's intent that "summon helper" always opens with the helper
+        // Agent's workspace settings, not whatever provider this dialog could
+        // find first.
+        dispatchHelperRequest({ description: prompt, appVersion });
     }, [runtimeDialog, appVersion]);
 
     // Track which MCP servers need configuration (missing required fields)
@@ -2319,6 +2319,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 {/* Providers section uses wider layout */}
                 {activeSection === 'providers' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
+                        {showAiInstallButton && (
+                            <SettingsHelperInbox
+                                providers={providers}
+                                apiKeys={apiKeys}
+                                providerVerifyStatus={providerVerifyStatus}
+                                appVersion={appVersion}
+                                initialProviderId={helperAgentDefaults.initialProviderId}
+                                initialModel={helperAgentDefaults.initialModel}
+                                onModelChange={helperAgentDefaults.onModelChange}
+                            />
+                        )}
                         <div className="mb-8 flex items-center justify-between">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">模型供应商</h2>
                             <button

@@ -1,20 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, ChevronUp, Send, ImagePlus } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { X, Send, ImagePlus } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 import { track } from '@/analytics';
-import { CUSTOM_EVENTS } from '../../shared/constants';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
-import type { ImageAttachment } from './SimpleChatInput';
-import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { useImagePreview } from '@/context/ImagePreviewContext';
-import { isProviderAvailable } from '@/config/configService';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
-import { Popover } from '@/components/ui/Popover';
-
-const MAX_IMAGES = 5;
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+import { HelperModelPicker, resolveInitialHelperModel } from '@/components/HelperModelPicker';
+import { useImageAttachments } from '@/hooks/useImageAttachments';
+import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
 
 interface BugReportOverlayProps {
     onClose: () => void;
@@ -38,82 +33,51 @@ export default function BugReportOverlay({
     useCloseLayer(() => { onClose(); return true; }, 250);
 
     const [description, setDescription] = useState('');
-    const [images, setImages] = useState<ImageAttachment[]>([]);
-    const [showModelMenu, _setShowModelMenu] = useState(false);
-    const [isDragging, setIsDragging] = useState(false);
-    const showModelMenuRef = useRef(false);
-    const setShowModelMenu = useCallback((v: boolean) => {
-        showModelMenuRef.current = v;
-        _setShowModelMenu(v);
-    }, []);
+    const menuOpenRef = useRef(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const modelBtnRef = useRef<HTMLButtonElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { openPreview } = useImagePreview();
+
+    const {
+        images,
+        addFile,
+        removeAt,
+        isDragging,
+        dragHandlers,
+        pasteHandler,
+    } = useImageAttachments();
 
     // Default selection: prefer the helper Agent's persisted default (if the
     // chosen provider is currently usable); fall back to the first available
     // provider's primaryModel. Computed once at mount — subsequent prop
     // changes don't reset the picker mid-session.
-    const [picked, setPicked] = useState<{ providerId: string; model: string }>(() => {
-        if (initialProviderId && initialModel) {
-            const persisted = providers.find(p => p.id === initialProviderId);
-            if (persisted && isProviderAvailable(persisted, apiKeys, providerVerifyStatus)) {
-                return { providerId: persisted.id, model: initialModel };
-            }
-        }
-        const firstAvailable = providers.find(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-        return { providerId: firstAvailable?.id ?? '', model: firstAvailable?.primaryModel ?? '' };
-    });
+    const [picked, setPicked] = useState(() =>
+        resolveInitialHelperModel(providers, apiKeys, providerVerifyStatus, {
+            providerId: initialProviderId,
+            model: initialModel,
+        }),
+    );
     const selectedProviderId = picked.providerId;
     const selectedModel = picked.model;
-
-    const selectedProvider = providers.find(p => p.id === selectedProviderId);
-
-    // Get display name for current model
-    const modelDisplayName = useMemo(() => {
-        if (!selectedProvider || !selectedModel) return '未选择模型';
-        const model = selectedProvider.models.find(m => m.model === selectedModel);
-        return model?.modelName || selectedModel;
-    }, [selectedProvider, selectedModel]);
 
     const hasValidModel = !!selectedProviderId && !!selectedModel;
     const hasText = description.trim().length > 0;
     const hasContent = hasText || images.length > 0;
     const canSubmit = hasContent && hasValidModel;
 
-    const addImage = useCallback((file: File) => {
-        if (images.length >= MAX_IMAGES) return;
-        if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) return;
-        if (file.size > MAX_IMAGE_SIZE) return;
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const dataUrl = e.target?.result as string;
-            setImages(prev => [...prev, {
-                id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                file,
-                preview: dataUrl,
-            }]);
-        };
-        reader.readAsDataURL(file);
-    }, [images.length]);
-
     // Focus textarea on mount
     useEffect(() => {
         textareaRef.current?.focus();
     }, []);
 
-    // Escape to close, click outside menu to close menu
+    // Dialog-level Escape closes the overlay, but defers to picker menu Esc
+    // (Popover handles Esc internally to close the menu first).
     const onCloseRef = useRef(onClose);
     useEffect(() => { onCloseRef.current = onClose; });
 
     useEffect(() => {
-        // Menu-level Escape / outside-click are handled by the Popover
-        // primitive. Dialog-level Escape (close overlay) stays here, but
-        // only fires when the menu is NOT open so Esc closes menu first.
         const handleKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape' && !showModelMenuRef.current) {
+            if (e.key === 'Escape' && !menuOpenRef.current) {
                 onCloseRef.current();
             }
         };
@@ -124,15 +88,13 @@ export default function BugReportOverlay({
     const handleSubmit = useCallback(() => {
         if (!canSubmit) return;
         track('bug_report_submit', { has_screenshot: images.length > 0 });
-        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
-            detail: {
-                description: description.trim(),
-                providerId: selectedProviderId,
-                model: selectedModel,
-                appVersion,
-                images,
-            },
-        }));
+        dispatchHelperRequest({
+            description,
+            providerId: selectedProviderId,
+            model: selectedModel,
+            appVersion,
+            images,
+        });
         onClose();
     }, [canSubmit, description, selectedProviderId, selectedModel, appVersion, images, onClose]);
 
@@ -143,42 +105,6 @@ export default function BugReportOverlay({
             handleSubmit();
         }
     }, [handleSubmit]);
-
-    const handlePaste = useCallback((e: React.ClipboardEvent) => {
-        const items = e.clipboardData?.items;
-        if (!items) return;
-        for (const item of Array.from(items)) {
-            if (item.kind === 'file') {
-                const file = item.getAsFile();
-                if (file && file.type.startsWith('image/')) {
-                    e.preventDefault();
-                    addImage(file);
-                    return;
-                }
-            }
-        }
-    }, [addImage]);
-
-    const handleDragOver = useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        setIsDragging(true);
-    }, []);
-
-    const handleDragLeave = useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        // Only clear dragging when leaving the container itself, not when entering children
-        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-            setIsDragging(false);
-        }
-    }, []);
-
-    const handleDrop = useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        setIsDragging(false);
-        for (const file of Array.from(e.dataTransfer.files)) {
-            if (file.type.startsWith('image/')) addImage(file);
-        }
-    }, [addImage]);
 
     const isMac = navigator.platform.toLowerCase().includes('mac');
     const getSubmitTitle = () => {
@@ -205,9 +131,7 @@ export default function BugReportOverlay({
                 <div className="rounded-b-[24px] bg-[var(--paper)] px-5 py-4">
                     <div
                         className={`rounded-2xl border bg-[var(--paper-elevated)] transition-colors ${isDragging ? 'border-[var(--accent)]' : 'border-[var(--line)]'}`}
-                        onDragOver={handleDragOver}
-                        onDragLeave={handleDragLeave}
-                        onDrop={handleDrop}
+                        {...dragHandlers}
                     >
                         {/* Image thumbnails */}
                         {images.length > 0 && (
@@ -222,7 +146,7 @@ export default function BugReportOverlay({
                                         />
                                         <button
                                             type="button"
-                                            onClick={() => setImages(prev => prev.filter(i => i.id !== img.id))}
+                                            onClick={() => removeAt(img.id)}
                                             className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--error)] text-white opacity-0 transition-opacity group-hover:opacity-100"
                                         >
                                             <X className="h-3 w-3" />
@@ -238,7 +162,7 @@ export default function BugReportOverlay({
                             value={description}
                             onChange={(e) => setDescription(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            onPaste={handlePaste}
+                            onPaste={pasteHandler}
                             placeholder="描述您遇到的问题、提出您的意见或建议"
                             className="w-full resize-none border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"
                             rows={5}
@@ -252,7 +176,7 @@ export default function BugReportOverlay({
                             multiple
                             className="hidden"
                             onChange={(e) => {
-                                for (const file of Array.from(e.target.files || [])) addImage(file);
+                                for (const file of Array.from(e.target.files || [])) addFile(file);
                                 e.target.value = '';
                             }}
                         />
@@ -271,69 +195,19 @@ export default function BugReportOverlay({
                                 </button>
 
                                 {/* Model selector */}
-                                <button
-                                    ref={modelBtnRef}
-                                    type="button"
-                                    onClick={() => setShowModelMenu(!showModelMenu)}
-                                    className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                >
-                                    <span className="max-w-[180px] truncate">{modelDisplayName}</span>
-                                    <ChevronUp className="h-3 w-3" />
-                                </button>
-                                <Popover
-                                    open={showModelMenu}
-                                    onClose={() => setShowModelMenu(false)}
-                                    anchorRef={modelBtnRef}
-                                    placement="top-start"
-                                    className="w-[260px] max-h-[300px] overflow-y-auto rounded-xl py-1 shadow-lg"
-                                >
-                                    {(() => {
-                                        const availableProviders = providers.filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-                                        if (availableProviders.length === 0) {
-                                            return (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setShowModelMenu(false);
-                                                        onNavigateToProviders();
-                                                    }}
-                                                    className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-inset)]"
-                                                >
-                                                    请先配置模型 →
-                                                </button>
-                                            );
-                                        }
-                                        return availableProviders.map((provider, idx) => (
-                                            <div key={provider.id}>
-                                                {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                                                <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                                                    {provider.name}
-                                                </div>
-                                                {provider.models.map(model => {
-                                                    const isSelected = selectedProviderId === provider.id && selectedModel === model.model;
-                                                    return (
-                                                        <button
-                                                            key={model.model}
-                                                            type="button"
-                                                            onClick={() => {
-                                                                setPicked({ providerId: provider.id, model: model.model });
-                                                                setShowModelMenu(false);
-                                                                onModelChange?.(provider.id, model.model);
-                                                            }}
-                                                            className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
-                                                                isSelected
-                                                                    ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
-                                                                    : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                                                            }`}
-                                                        >
-                                                            {model.modelName}
-                                                        </button>
-                                                    );
-                                                })}
-                                            </div>
-                                        ));
-                                    })()}
-                                </Popover>
+                                <HelperModelPicker
+                                    providers={providers}
+                                    apiKeys={apiKeys}
+                                    verifyStatus={providerVerifyStatus}
+                                    value={picked}
+                                    onChange={(providerId, model) => {
+                                        setPicked({ providerId, model });
+                                        onModelChange?.(providerId, model);
+                                    }}
+                                    onNavigateToProviders={onNavigateToProviders}
+                                    onOpenChange={(open) => { menuOpenRef.current = open; }}
+                                    triggerClassName="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                />
                             </div>
 
                             {/* Send button */}
