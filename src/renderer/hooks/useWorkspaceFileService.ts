@@ -25,6 +25,68 @@ interface CopiedFile {
   renamed: boolean;
 }
 
+// Phase D additions — DirectoryPanel calls these for tree / preview / CRUD.
+// Shapes mirror the sidecar JSON these commands replace, so the React tree
+// model and preview modal don't need parallel branches.
+
+interface DirectoryTreeNode {
+  id: string;
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  children?: DirectoryTreeNode[];
+  loaded?: boolean;
+}
+
+interface DirectoryTreeResult {
+  root: string;
+  summary: { totalFiles: number; totalDirs: number };
+  tree: DirectoryTreeNode;
+  truncated: boolean;
+}
+
+interface ExpandDirectoryResult {
+  children: DirectoryTreeNode[];
+  loaded: boolean;
+}
+
+interface PreviewResult {
+  content: string;
+  name: string;
+  size: number;
+}
+
+interface DownloadResult {
+  name: string;
+  mimeType: string;
+  data: string;
+}
+
+interface CreatePathResult {
+  success: boolean;
+  path: string;
+}
+
+interface RenameResult {
+  success: boolean;
+  newPath: string;
+}
+
+interface MovedFile {
+  oldPath: string;
+  newPath: string;
+}
+
+interface MoveResult {
+  success: boolean;
+  movedFiles: MovedFile[];
+  errors: string[];
+}
+
+interface GitBranchResult {
+  branch: string | null;
+}
+
 interface ImportResult {
   success: boolean;
   files: string[];
@@ -103,6 +165,31 @@ export interface WorkspaceFileService {
   deleteFile(args: { path: string }): Promise<DeleteResult>;
   /** List slash-command picker entries — global + project skills + builtins. */
   listSlashCommands(): Promise<SlashCommandsResponse>;
+  // ─── Phase D: DirectoryPanel ops ───
+  /** Initial directory tree walk (depth + entry capped on the Rust side). */
+  dirTree(): Promise<DirectoryTreeResult>;
+  /** Lazy-expand a single directory marked `loaded:false` in the tree. */
+  dirExpand(args: { path: string }): Promise<ExpandDirectoryResult>;
+  /** Read a previewable text file for the preview modal (≤512KB). */
+  readPreview(args: { path: string }): Promise<PreviewResult>;
+  /** Read a binary file (image, etc.) as base64 for blob reconstruction. */
+  downloadFile(args: { path: string }): Promise<DownloadResult>;
+  newFile(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
+  newFolder(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
+  rename(args: { oldPath: string; newName: string }): Promise<RenameResult>;
+  movePaths(args: { sourcePaths: string[]; targetDir: string }): Promise<MoveResult>;
+  openInFinder(args: { path: string }): Promise<void>;
+  openWithDefault(args: { path: string }): Promise<void>;
+  gitBranch(): Promise<GitBranchResult>;
+  /** Start the per-workspace fs watcher (ref-counted process-wide). The
+   *  caller MUST pair this with `watchStop` on unmount/route-change to
+   *  release the watch handle. */
+  watchStart(): Promise<void>;
+  watchStop(): Promise<void>;
+  /** Stable hash key used inside the Tauri event name
+   *  `workspace:files-changed:<key>`. Listen with `listen()` from
+   *  `@tauri-apps/api/event`. */
+  watchEventKey(): Promise<string>;
   /** Whether the current environment supports these calls. False in browser dev mode. */
   isAvailable: boolean;
   /** The workspace path bound to this service. Useful for debug toasts. */
@@ -205,6 +292,134 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
+  const dirTree: WorkspaceFileService['dirTree'] = useCallback(async () => {
+    const ws = requireWorkspace();
+    return invokeIfTauri<DirectoryTreeResult>('cmd_workspace_dir_tree', { workspace: ws });
+  }, [requireWorkspace, invokeIfTauri]);
+
+  const dirExpand: WorkspaceFileService['dirExpand'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<ExpandDirectoryResult>('cmd_workspace_dir_expand', {
+        workspace: ws,
+        path,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const readPreview: WorkspaceFileService['readPreview'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<PreviewResult>('cmd_workspace_read_preview', {
+        workspace: ws,
+        path,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const downloadFile: WorkspaceFileService['downloadFile'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<DownloadResult>('cmd_workspace_download_file', {
+        workspace: ws,
+        path,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const newFile: WorkspaceFileService['newFile'] = useCallback(
+    async ({ parentDir, name }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<CreatePathResult>('cmd_workspace_new_file', {
+        workspace: ws,
+        parentDir,
+        name,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const newFolder: WorkspaceFileService['newFolder'] = useCallback(
+    async ({ parentDir, name }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<CreatePathResult>('cmd_workspace_new_folder', {
+        workspace: ws,
+        parentDir,
+        name,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const rename: WorkspaceFileService['rename'] = useCallback(
+    async ({ oldPath, newName }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<RenameResult>('cmd_workspace_rename', {
+        workspace: ws,
+        oldPath,
+        newName,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const movePaths: WorkspaceFileService['movePaths'] = useCallback(
+    async ({ sourcePaths, targetDir }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<MoveResult>('cmd_workspace_move', {
+        workspace: ws,
+        sourcePaths,
+        targetDir,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const openInFinder: WorkspaceFileService['openInFinder'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      await invokeIfTauri<void>('cmd_workspace_open_in_finder', {
+        workspace: ws,
+        path,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const openWithDefault: WorkspaceFileService['openWithDefault'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      await invokeIfTauri<void>('cmd_workspace_open_with_default', {
+        workspace: ws,
+        path,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const gitBranch: WorkspaceFileService['gitBranch'] = useCallback(async () => {
+    const ws = requireWorkspace();
+    return invokeIfTauri<GitBranchResult>('cmd_workspace_git_branch', { workspace: ws });
+  }, [requireWorkspace, invokeIfTauri]);
+
+  const watchStart: WorkspaceFileService['watchStart'] = useCallback(async () => {
+    const ws = requireWorkspace();
+    await invokeIfTauri<void>('cmd_workspace_watch_start', { workspace: ws });
+  }, [requireWorkspace, invokeIfTauri]);
+
+  const watchStop: WorkspaceFileService['watchStop'] = useCallback(async () => {
+    const ws = requireWorkspace();
+    await invokeIfTauri<void>('cmd_workspace_watch_stop', { workspace: ws });
+  }, [requireWorkspace, invokeIfTauri]);
+
+  const watchEventKey: WorkspaceFileService['watchEventKey'] = useCallback(async () => {
+    const ws = requireWorkspace();
+    return invokeIfTauri<string>('cmd_workspace_watch_event_key', { workspace: ws });
+  }, [requireWorkspace, invokeIfTauri]);
+
   // Wrap the returned object in useMemo so consumers that put `fileService`
   // in `useCallback` deps (e.g. SimpleChatInput's processDroppedFiles,
   // searchFiles, fetchCommands — ~10 sites) don't rebuild on every keystroke.
@@ -220,6 +435,21 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       searchFiles,
       deleteFile,
       listSlashCommands,
+      // Phase D
+      dirTree,
+      dirExpand,
+      readPreview,
+      downloadFile,
+      newFile,
+      newFolder,
+      rename,
+      movePaths,
+      openInFinder,
+      openWithDefault,
+      gitBranch,
+      watchStart,
+      watchStop,
+      watchEventKey,
       isAvailable,
       workspacePath,
     }),
@@ -231,6 +461,20 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       searchFiles,
       deleteFile,
       listSlashCommands,
+      dirTree,
+      dirExpand,
+      readPreview,
+      downloadFile,
+      newFile,
+      newFolder,
+      rename,
+      movePaths,
+      openInFinder,
+      openWithDefault,
+      gitBranch,
+      watchStart,
+      watchStop,
+      watchEventKey,
       isAvailable,
       workspacePath,
     ],

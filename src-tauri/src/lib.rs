@@ -196,6 +196,9 @@ pub fn run() {
         .manage(browser_state)
         .manage(thought_state)
         .manage(task_state)
+        // PRD 0.2.7 Phase D: per-process registry of active workspace
+        // filesystem watchers (one debouncer per workspace, ref-counted).
+        .manage(std::sync::Arc::new(workspace_files::watcher::WorkspaceWatchers::default()))
         // SearchEngine will be added as managed state in .setup()
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
@@ -338,10 +341,14 @@ pub fn run() {
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
             config_io::cmd_fsync_path,
-            // Workspace file IO (workspace_files module) — Phase A of input-box unification.
-            // These replace sidecar HTTP endpoints (/api/files/*, /agent/search-files,
-            // /api/commands, /agent/delete) so the launcher input — which has no Sidecar —
-            // can do the same operations as the chat-tab input. See PRD 0.2.7.
+            // Workspace file IO (workspace_files module).
+            // Phase A (input-box unification): files_b64 / transfer / gitignore /
+            //   search / delete / slash.
+            // Phase D (DirectoryPanel migration): tree / read_preview / download /
+            //   crud / system_open / git_branch / watcher.
+            //
+            // These replace sidecar HTTP endpoints (/api/files/*, /agent/*,
+            // /api/commands, /api/git/branch). See PRD 0.2.7.
             //
             // tauri::generate_handler! resolves auto-generated `__cmd__<name>` wrappers
             // from the same module that defined the command, so we MUST use the
@@ -354,6 +361,20 @@ pub fn run() {
             workspace_files::search::cmd_workspace_search_files_fuzzy,
             workspace_files::delete::cmd_workspace_delete,
             workspace_files::slash::cmd_list_slash_commands,
+            workspace_files::tree::cmd_workspace_dir_tree,
+            workspace_files::tree::cmd_workspace_dir_expand,
+            workspace_files::read_preview::cmd_workspace_read_preview,
+            workspace_files::download::cmd_workspace_download_file,
+            workspace_files::crud::cmd_workspace_new_file,
+            workspace_files::crud::cmd_workspace_new_folder,
+            workspace_files::crud::cmd_workspace_rename,
+            workspace_files::crud::cmd_workspace_move,
+            workspace_files::system_open::cmd_workspace_open_in_finder,
+            workspace_files::system_open::cmd_workspace_open_with_default,
+            workspace_files::git_branch::cmd_workspace_git_branch,
+            workspace_files::watcher::cmd_workspace_watch_start,
+            workspace_files::watcher::cmd_workspace_watch_stop,
+            workspace_files::watcher::cmd_workspace_watch_event_key,
             // Full-text search commands
             search::cmd_search_sessions,
             search::cmd_search_workspace_files,

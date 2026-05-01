@@ -44,11 +44,10 @@ import {
 } from "@dnd-kit/core";
 
 import { useTabApi } from "@/context/TabContext";
-import { getTabServerUrl, proxyFetch, isTauri } from "@/api/tauriClient";
+import { useWorkspaceFileService } from "@/hooks/useWorkspaceFileService";
 import type {
   DirectoryTreeNode,
   DirectoryTree,
-  ExpandDirectoryResult,
 } from "../../shared/dir-types";
 import { isImageFile, isPreviewable } from "../../shared/fileTypes";
 import type { CapabilityInitialSelect } from "../../shared/skillsTypes";
@@ -333,7 +332,17 @@ const DirectoryPanel = memo(
     const toast = useToast();
 
     // Get Tab-scoped API functions and tabId
-    const { apiGet, apiPost, tabId } = useTabApi();
+    // PRD 0.2.7 Phase D: useTabApi() return value is no longer destructured —
+    // file IO has migrated entirely to `useWorkspaceFileService`. The TabApi
+    // hook still wraps React subscription state, so keeping the call
+    // ensures the component re-renders when Tab context changes (active /
+    // inactive). If a future refactor proves the call has no observable
+    // side effects, it can be dropped.
+    useTabApi();
+    // PRD 0.2.7 Phase D: workspace file IO migrated from sidecar HTTP to Rust
+    // invoke. The hook is identical to the one SimpleChatInput uses, just with
+    // the additional Phase D operations (dirTree, dirExpand, readPreview, etc.).
+    const fileService = useWorkspaceFileService(agentDir ?? null);
 
     // Narrow mode collapse state (for responsive layout)
     const [isNarrowMode, setIsNarrowMode] = useState(false);
@@ -391,7 +400,7 @@ const DirectoryPanel = memo(
     // session gets a fresh index exactly once.
     const rawRefresh = useCallback(() => {
       setError(null);
-      apiGet<DirectoryTree>("/agent/dir")
+      fileService.dirTree()
         .then((data) => {
           const newCount = data.tree?.children?.length || 0;
           if (newCount !== prevItemCountRef.current) {
@@ -403,9 +412,10 @@ const DirectoryPanel = memo(
           setDirectoryInfo(data);
         })
         .catch((err) => {
-          // Sidecar boot races are absorbed at the `tauriClient.getTabServerUrl`
-          // layer (it waits for readiness before returning), so a failure
-          // here means something genuinely went wrong — surface it.
+          // PRD 0.2.7 Phase D: switching from sidecar HTTP to Rust invoke
+          // means we no longer have to wait for sidecar readiness before
+          // refreshing — Rust commands are always live. A failure here is
+          // genuine (workspace deleted, permission denied, etc).
           setError(
             err instanceof Error
               ? err.message
@@ -413,7 +423,7 @@ const DirectoryPanel = memo(
           );
           console.error("[DirectoryPanel] Failed to refresh:", err);
         });
-    }, [apiGet]);
+    }, [fileService]);
 
     // Debounced refresh — coalesces rapid triggers (file watcher + tool completion
     // can fire within 500ms of each other) into a single API call.
@@ -471,9 +481,7 @@ const DirectoryPanel = memo(
         setLoadingDirs(new Set(loadingDirsRef.current));
 
         try {
-          const result = await apiGet<ExpandDirectoryResult>(
-            `/agent/dir/expand?path=${encodeURIComponent(dirPath)}`,
-          );
+          const result = await fileService.dirExpand({ path: dirPath });
 
           setDirectoryInfo((prev: DirectoryTree | null) => {
             if (!prev) return prev;
@@ -502,25 +510,75 @@ const DirectoryPanel = memo(
           setLoadingDirs(new Set(loadingDirsRef.current));
         }
       },
-      [apiGet, updateNodeInTree],
+      [fileService, updateNodeInTree],
     );
 
     useEffect(() => {
       rawRefresh(); // Initial load — no debounce needed
       // Clear old branch first to avoid flash, then fetch new
       setGitBranch(null);
-      apiGet<{ branch: string | null }>("/api/git/branch")
+      fileService.gitBranch()
         .then((data) => setGitBranch(data.branch))
         .catch(() => setGitBranch(null));
-    }, [agentDir, apiGet, rawRefresh]);
+    }, [agentDir, fileService, rawRefresh]);
 
-    // Respond to external refresh trigger (file watcher SSE + tool completion fast-path).
-    // Uses debounced refresh to coalesce rapid triggers.
+    // Respond to external refresh trigger (parent-driven, e.g. tool completion
+    // fast-path). Uses debounced refresh to coalesce rapid triggers.
     useEffect(() => {
       if (refreshTrigger && refreshTrigger > 0) {
         refresh();
       }
     }, [refreshTrigger, refresh]);
+
+    // PRD 0.2.7 Phase D: Tauri-side workspace fs watcher.
+    //
+    // Pre-PRD-0.2.7 the sidecar emitted SSE `agent:files-changed` from a Node
+    // chokidar watcher and DirectoryPanel listened via the SSE proxy. Phase D
+    // moves the watch to Rust (notify-debouncer-full) so the panel works
+    // without a sidecar; the event hops Tauri-side via `app.emit` and the
+    // renderer subscribes through `@tauri-apps/api/event::listen`.
+    //
+    // Lifecycle: start the watch on mount (or when agentDir changes), stop on
+    // unmount. The Rust side ref-counts, so multiple panels on the same
+    // workspace share one OS watch.
+    useEffect(() => {
+      if (!fileService.isAvailable) return;
+      let cancelled = false;
+      let unlisten: (() => void) | null = null;
+      let started = false;
+
+      (async () => {
+        try {
+          const eventKey = await fileService.watchEventKey();
+          if (cancelled) return;
+          await fileService.watchStart();
+          if (cancelled) {
+            // Race: unmount fired between the two awaits — release.
+            await fileService.watchStop().catch(() => {});
+            return;
+          }
+          started = true;
+          const { listen } = await import("@tauri-apps/api/event");
+          if (cancelled) return;
+          unlisten = await listen(`workspace:files-changed:${eventKey}`, () => {
+            // Coarse signal — refresh re-fetches the whole tree (debounced).
+            refreshRef.current();
+          });
+        } catch (err) {
+          console.warn("[DirectoryPanel] watch start failed:", err);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+        if (unlisten) {
+          unlisten();
+        }
+        if (started) {
+          fileService.watchStop().catch(() => {});
+        }
+      };
+    }, [fileService]);
 
     // Safety-net polling: catch anything the file watcher might miss.
     // With the watcher active, this is a fallback — 120s is sufficient.
@@ -622,9 +680,7 @@ const DirectoryPanel = memo(
       setIsPreviewLoading(true);
 
       try {
-        const payload = await apiGet<Omit<FilePreview, "path">>(
-          `/agent/file?path=${encodeURIComponent(node.path)}`,
-        );
+        const payload = await fileService.readPreview({ path: node.path });
         const fileData = { ...payload, path: node.path };
         // Route to external handler (split view) if provided, otherwise open modal
         if (onFilePreviewExternal) {
@@ -650,7 +706,7 @@ const DirectoryPanel = memo(
     const handleSearchItemClick = async (path: string, initialLineNumber?: number) => {
       setIsPreviewLoading(true);
       try {
-        const payload = await apiGet<Omit<FilePreview, "path">>(`/agent/file?path=${encodeURIComponent(path)}`);
+        const payload = await fileService.readPreview({ path });
         const fileData = { ...payload, path, initialLineNumber };
         if (onFilePreviewExternal) {
           onFilePreviewExternal(fileData);
@@ -673,22 +729,13 @@ const DirectoryPanel = memo(
     const handleImagePreview = async (node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
       try {
-        const endpoint = `/agent/download?path=${encodeURIComponent(node.path)}`;
-        let response: Response;
-        if (isTauri()) {
-          const baseUrl = await getTabServerUrl(tabId);
-          response = await proxyFetch(`${baseUrl}${endpoint}`);
-        } else {
-          response = await fetch(endpoint);
-        }
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(blob);
-        });
+        // PRD 0.2.7 Phase D: pre-migration this fetched the sidecar's
+        // /agent/download via Rust proxy, then converted the response Blob
+        // to a data URL. Rust now returns base64 directly so we skip the
+        // FileReader trip — `data:<mime>;base64,<body>` is the same thing
+        // FileReader.readAsDataURL would have produced.
+        const result = await fileService.downloadFile({ path: node.path });
+        const dataUrl = `data:${result.mimeType};base64,${result.data}`;
         openPreview(dataUrl, node.name);
       } catch (err) {
         console.error("[DirectoryPanel] Failed to load image:", err);
@@ -696,27 +743,32 @@ const DirectoryPanel = memo(
       }
     };
 
+    // Pre-PRD-0.2.7: a hidden <input type="file" multiple> fed File objects
+    // here, which we wrapped in FormData and POSTed to /agent/import (cap
+    // 500MB, streamed to disk by the sidecar). Tauri's IPC isn't built for
+    // 500MB base64 payloads, so D4 takes a different (and faster) path:
+    // for the file-picker entry point we open a Tauri native dialog to get
+    // ABSOLUTE PATHS, then `cmd_workspace_copy_paths` cp's them directly in
+    // Rust — no base64 round-trip, no payload limit. The drag-drop entry
+    // point already works on browser File objects (no path) so it stays on
+    // the base64 branch via importBase64Files.
     const handleImport = async (files: FileList | null) => {
-      if (!files || files.length === 0 || isUploading) {
-        return;
-      }
-
+      // Browser/file-input <input type="file"> path: each File has no real
+      // path, so we go through base64 import — same flow used by SimpleChatInput.
+      if (!files || files.length === 0 || isUploading) return;
       setIsUploading(true);
       try {
-        const formData = new FormData();
-        Array.from(files).forEach((file) => {
-          formData.append("files", file, file.name);
+        const base64Files = await Promise.all(
+          Array.from(files).map(async (file) => ({
+            name: file.name,
+            content: await fileToBase64(file),
+          })),
+        );
+        const result = await fileService.importBase64Files({
+          files: base64Files,
+          targetDir: importTargetDir || undefined,
         });
-        const url = importTargetDir
-          ? `/agent/import?targetDir=${encodeURIComponent(importTargetDir)}`
-          : "/agent/import";
-        const response = await fetch(url, {
-          method: "POST",
-          body: formData,
-        });
-        if (!response.ok) {
-          throw new Error("Import failed");
-        }
+        if (!result.success) throw new Error("Import failed");
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Import failed");
@@ -741,34 +793,25 @@ const DirectoryPanel = memo(
       });
     }, []);
 
-    // External file import for drag-drop
+    // External file drag-drop (browser File objects → no path → base64 path).
     const handleExternalFileDrop = useCallback(
       async (files: File[], targetDir: string = "") => {
         if (files.length === 0 || isUploading) {
           return;
         }
-
         setIsUploading(true);
         try {
-          // Convert files to base64 for JSON upload (works in Tauri)
           const base64Files = await Promise.all(
             files.map(async (file) => ({
               name: file.name,
               content: await fileToBase64(file),
             })),
           );
-
-          // Upload via base64 API endpoint
-          const result = await apiPost<{
-            success: boolean;
-            files: string[];
-            error?: string;
-          }>("/api/files/import-base64", { files: base64Files, targetDir });
-
-          if (!result.success) {
-            throw new Error(result.error || "Import failed");
-          }
-
+          const result = await fileService.importBase64Files({
+            files: base64Files,
+            targetDir: targetDir || undefined,
+          });
+          if (!result.success) throw new Error("Import failed");
           refresh();
         } catch (err) {
           console.error("[DirectoryPanel] File upload error:", err);
@@ -777,37 +820,23 @@ const DirectoryPanel = memo(
           setIsUploading(false);
         }
       },
-      [isUploading, refresh, apiPost, fileToBase64],
+      [isUploading, refresh, fileService, fileToBase64],
     );
 
-    // Handle file paths from Tauri drag-drop (copies from OS paths)
+    // Tauri drag-drop (real OS paths → cp directly, no base64).
     const handleTauriFileDrop = useCallback(
       async (paths: string[], targetDir: string = "") => {
         if (paths.length === 0 || isUploading) {
           return;
         }
-
         setIsUploading(true);
         try {
-          // Use /api/files/copy which handles copying from OS paths
-          const result = await apiPost<{
-            success: boolean;
-            copiedFiles: Array<{
-              sourcePath: string;
-              targetPath: string;
-              renamed: boolean;
-            }>;
-            error?: string;
-          }>("/api/files/copy", {
+          const result = await fileService.copyPaths({
             sourcePaths: paths,
-            targetDir: targetDir,
+            targetDir,
             autoRename: true,
           });
-
-          if (!result.success) {
-            throw new Error(result.error || "Copy failed");
-          }
-
+          if (!result.success) throw new Error("Copy failed");
           if (isDebugMode()) {
             console.log(
               "[DirectoryPanel] Tauri drop copied files:",
@@ -822,7 +851,7 @@ const DirectoryPanel = memo(
           setIsUploading(false);
         }
       },
-      [isUploading, refresh, apiPost],
+      [isUploading, refresh, fileService],
     );
 
     // Expose imperative handle for parent to call
@@ -947,13 +976,13 @@ const DirectoryPanel = memo(
     const handleMove = useCallback(
       async (sourcePaths: string[], targetDir: string) => {
         try {
-          await apiPost("/agent/move", { sourcePaths, targetDir });
+          await fileService.movePaths({ sourcePaths, targetDir });
           refresh();
         } catch (err) {
           setError(err instanceof Error ? err.message : "Move failed");
         }
       },
-      [apiPost, refresh],
+      [fileService, refresh],
     );
 
     // --- Internal DnD via @dnd-kit (pointer-events based, reliable in Tauri WebView) ---
@@ -1133,7 +1162,7 @@ const DirectoryPanel = memo(
 
     const handleOpenInFinder = async (path: string) => {
       try {
-        await apiPost("/agent/open-in-finder", { path });
+        await fileService.openInFinder({ path });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to open");
       }
@@ -1141,7 +1170,7 @@ const DirectoryPanel = memo(
 
     const handleOpenWithDefault = async (path: string) => {
       try {
-        await apiPost("/agent/open-with-default", { path });
+        await fileService.openWithDefault({ path });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to open");
       }
@@ -1149,7 +1178,7 @@ const DirectoryPanel = memo(
 
     const handleRename = async (oldPath: string, newName: string) => {
       try {
-        await apiPost("/agent/rename", { oldPath, newName });
+        await fileService.rename({ oldPath, newName });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Rename failed");
@@ -1158,7 +1187,7 @@ const DirectoryPanel = memo(
 
     const handleDelete = async (path: string) => {
       try {
-        await apiPost("/agent/delete", { path });
+        await fileService.deleteFile({ path });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Delete failed");
@@ -1167,7 +1196,7 @@ const DirectoryPanel = memo(
 
     const handleNewFile = async (parentDir: string, name: string) => {
       try {
-        await apiPost("/agent/new-file", { parentDir, name });
+        await fileService.newFile({ parentDir, name });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Create failed");
@@ -1176,7 +1205,7 @@ const DirectoryPanel = memo(
 
     const handleNewFolder = async (parentDir: string, name: string) => {
       try {
-        await apiPost("/agent/new-folder", { parentDir, name });
+        await fileService.newFolder({ parentDir, name });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Create failed");
@@ -1266,7 +1295,7 @@ const DirectoryPanel = memo(
         });
 
         for (const node of filteredNodes) {
-          await apiPost("/agent/delete", { path: node.path });
+          await fileService.deleteFile({ path: node.path });
         }
         setSelectedNodes([]);
         refresh();
@@ -1762,28 +1791,13 @@ const DirectoryPanel = memo(
                           if (isImageFile(data.name)) {
                             setIsPreviewLoading(true);
                             try {
-                              const endpoint = `/agent/download?path=${encodeURIComponent(data.path)}`;
-                              let response: Response;
-                              if (isTauri()) {
-                                const baseUrl = await getTabServerUrl(tabId);
-                                response = await proxyFetch(
-                                  `${baseUrl}${endpoint}`,
-                                );
-                              } else {
-                                response = await fetch(endpoint);
-                              }
-                              if (!response.ok)
-                                throw new Error(`HTTP ${response.status}`);
-                              const blob = await response.blob();
-                              const dataUrl = await new Promise<string>(
-                                (resolve, reject) => {
-                                  const reader = new FileReader();
-                                  reader.onload = () =>
-                                    resolve(reader.result as string);
-                                  reader.onerror = () => reject(reader.error);
-                                  reader.readAsDataURL(blob);
-                                },
-                              );
+                              // PRD 0.2.7 Phase D: same migration as
+                              // handleImagePreview — Rust returns base64
+                              // already, no FileReader round-trip needed.
+                              const result = await fileService.downloadFile({
+                                path: data.path,
+                              });
+                              const dataUrl = `data:${result.mimeType};base64,${result.data}`;
                               openPreview(dataUrl, data.name);
                             } catch (err) {
                               console.error(

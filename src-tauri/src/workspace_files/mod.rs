@@ -22,13 +22,20 @@
 //! Phase E after DirectoryPanel migrates too. ESLint enforcement covers the
 //! transition.
 
+pub mod crud;
 pub mod delete;
+pub mod download;
 pub mod files_b64;
+pub mod git_branch;
 pub mod gitignore;
 pub mod path_safety;
+pub mod read_preview;
 pub mod search;
 pub mod slash;
+pub mod system_open;
 pub mod transfer;
+pub mod tree;
+pub mod watcher;
 #[cfg(test)]
 pub(crate) mod test_support;
 
