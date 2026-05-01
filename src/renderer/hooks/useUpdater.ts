@@ -220,11 +220,13 @@ export function useUpdater(): UseUpdaterResult {
             }
         }
 
-        // macOS: relaunch picks up the already-installed update.
-        // Sidecar shutdown still helps on macOS (releases child processes),
-        // and the install was already done at download time, so failure
-        // here just means we couldn't gracefully reboot — not as severe as
-        // the Windows pre-shutdown failure mode.
+        // macOS / Linux: relaunch picks up the already-installed update.
+        // On macOS the .app was swapped during silent download_and_install;
+        // on Linux the AppImage was overwritten in place. Either way the
+        // bytes are committed by the time we get here, so a failure below
+        // just means we couldn't gracefully reboot — far less severe than
+        // the Windows pre-shutdown failure mode. Sidecar shutdown still
+        // helps (releases child processes) but is best-effort.
         try {
             await invoke('cmd_shutdown_for_update');
         } catch (err) {
