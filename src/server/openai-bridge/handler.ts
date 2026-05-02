@@ -1,6 +1,12 @@
 // Bridge HTTP handler: receives Anthropic requests, translates to OpenAI, forwards, translates back
 
-import { ProxyAgent, type Dispatcher } from 'undici';
+// MUST import `fetch` from undici (not use global fetch). Node 24's built-in
+// fetch is undici 7.21.0, but our `package.json` pins `undici@^8`. Passing an
+// undici-8 ProxyAgent dispatcher into undici-7's global fetch crashes with
+// `UND_ERR_INVALID_ARG: invalid onRequestStart method` (internal API drift
+// between majors). Importing fetch from the same package guarantees the
+// dispatcher and fetch share the same internal contract.
+import { fetch, ProxyAgent, type Dispatcher } from 'undici';
 import type { BridgeConfig, UpstreamConfig } from './types/bridge';
 import type { AnthropicRequest } from './types/anthropic';
 import type { OpenAIRequest, OpenAIResponse, OpenAIStreamChunk } from './types/openai';
@@ -258,14 +264,23 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
       if (proxyUrl) {
         fetchInit.dispatcher = getDispatcherForProxy(proxyUrl);
       }
-      upstreamResp = await fetch(upstreamUrl, fetchInit);
+      // Cast to global Response — undici.Response is structurally identical at
+      // runtime; the type drift is only in @types/node vs undici/types Headers
+      // iterators. Downstream handlers (handleStreamResponse etc.) treat the
+      // body as a ReadableStream<Uint8Array>, which works for both shapes.
+      upstreamResp = await fetch(upstreamUrl, fetchInit as Parameters<typeof fetch>[1]) as unknown as Response;
     } catch (err) {
       clearTimeout(headersTimer);
       if (request.signal) {
         request.signal.removeEventListener('abort', onDownstreamAbort);
       }
       const isTimeout = err instanceof Error && err.name === 'AbortError';
-      const errMsg = err instanceof Error ? err.message : String(err);
+      // undici surfaces the real reason on `err.cause` (TypeError: fetch failed
+      // is the wrapper). Inline the cause so logs aren't useless.
+      const causeRaw = err instanceof Error ? (err as Error & { cause?: unknown }).cause : undefined;
+      const causeMsg = causeRaw instanceof Error ? causeRaw.message : (causeRaw ? String(causeRaw) : '');
+      const baseMsg = err instanceof Error ? err.message : String(err);
+      const errMsg = causeMsg ? `${baseMsg} (cause: ${causeMsg})` : baseMsg;
       log(`[bridge] Upstream ${isTimeout ? 'timeout' : 'error'}: ${errMsg}`);
       // Record for verify-timeout diagnostics (see getLastBridgeError docstring).
       // Only the connect-layer catch path — HTTP error responses (!upstreamResp.ok)
