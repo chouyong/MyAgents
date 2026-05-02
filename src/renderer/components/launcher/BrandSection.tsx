@@ -466,7 +466,32 @@ export default memo(function BrandSection({
                      * switches (SimpleChatInput's text + images, ThoughtInput's
                      * text + caret position) because nothing unmounts.
                      */}
-                    <div className="grid *:col-start-1 *:row-start-1">
+                    {/* Center-axis growth compensation. Without this, the
+                     *  flex-1 brand block above absorbs all of the input's
+                     *  height growth → input bottom is anchored by `pb-[12vh]`
+                     *  → input grows entirely upward. The user sees "the
+                     *  input snaps to the top, then the bottom expands down"
+                     *  even though the textarea height transitions smoothly.
+                     *
+                     *  Counter the layout shift by translating the input
+                     *  wrapper DOWN by half the growth (`g/2`). Combined
+                     *  with the layout's natural top-shift of `g`, the net
+                     *  effect is: top moves up by `g/2`, bottom moves down
+                     *  by `g/2` — symmetric center-axis growth.
+                     *
+                     *  Hardcoded `117` = (MAX_LINES_EXPANDED - LAUNCHER_MIN_LINES)
+                     *  * LINE_HEIGHT / 2 = (12 - 3) * 26 / 2. If the
+                     *  SimpleChatInput / ThoughtInput growth changes, update
+                     *  this constant in lockstep. Same easing + duration
+                     *  as the textarea's own height transition so they
+                     *  stay in phase. */}
+                    <div
+                        className="grid *:col-start-1 *:row-start-1"
+                        style={{
+                            transform: `translateY(${inputExpanded ? 117 : 0}px)`,
+                            transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+                        }}
+                    >
                         <div
                             className={mode === 'thought' ? 'invisible pointer-events-none' : ''}
                             aria-hidden={mode === 'thought'}

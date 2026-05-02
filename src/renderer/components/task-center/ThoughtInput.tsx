@@ -550,6 +550,19 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
               WebkitTextFillColor: 'transparent',
               minHeight: `${textareaMinHeightPx}px`,
               maxHeight: `${textareaMaxHeightPx}px`,
+              // Animate the expand/collapse toggle (launcher's "想法" mode
+              // grows from 3 → 12 lines when the user hits the chevron).
+              // Mirrors SimpleChatInput's pattern so both inputs feel like
+              // the same affordance — explicit property list + `height` so
+              // collapse animates symmetrically (WebKit textareas sometimes
+              // drop the transition on shrink when only `max-height` is
+              // listed). The `useLayoutEffect` above writes `style.height`
+              // imperatively; the final declared value wins and the
+              // transition runs from previous baseline → target.
+              transitionProperty: 'min-height, max-height, height',
+              transitionDuration: '220ms',
+              transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
+              willChange: 'max-height',
             }}
           />
           {showExpandToggle && (
