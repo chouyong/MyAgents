@@ -343,6 +343,13 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             // skips the fetch (preview text/code still works).
             workspacePath={workspacePath}
             onClose={() => setPreviewFile(null)}
+            onRenamed={(newPath, newName) => {
+              // Update local preview state so subsequent saves target the new
+              // location. The fs watcher refreshes the directory tree.
+              setPreviewFile((prev) =>
+                prev ? { ...prev, path: newPath, name: newName } : prev,
+              );
+            }}
             // Phase D.5: route reveal-in-finder through fileService rather
             // than letting the modal fall back to sidecar `/agent/open-in-finder`.
             onRevealFile={async () => {

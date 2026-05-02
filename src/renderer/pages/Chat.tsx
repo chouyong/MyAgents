@@ -277,9 +277,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  // Split view: right-side file preview panel (experimental)
+  // Split view: right-side file preview panel (experimental).
+  // `initialEditMode` is set when a fresh `note-…md` is created via 「新建笔记」 —
+  // FilePreviewModal opens directly in the editable Monaco view instead of the
+  // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -379,9 +382,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
       // HTML files → open in embedded browser for live preview
@@ -393,7 +396,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       setBrowserUrl(absPath);
       setSplitActiveView('browser');
     } else {
-      setSplitFile(file);
+      setSplitFile({ ...file, initialEditMode: options?.initialEditMode });
       setSplitActiveView('file');
     }
     // Keep workspace open — user can dismiss it manually
@@ -3158,12 +3161,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     content={splitFile.content}
                     size={splitFile.size}
                     path={splitFile.path}
+                    workspacePath={agentDir}
+                    initialEditMode={splitFile.initialEditMode}
                     onClose={() => {
                       setSplitFile(null);
                       if (browserUrl) setSplitActiveView('browser');
                       else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                     }}
                     onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+                    onRenamed={(newPath, newName) => {
+                      setSplitFile(prev => prev ? { ...prev, path: newPath, name: newName, initialEditMode: undefined } : prev);
+                      setWorkspaceRefreshTrigger(prev => prev + 1);
+                    }}
                     embedded
                     onFullscreen={(currentContent) => {
                       const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
@@ -3265,8 +3274,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             content={fullscreenPreviewFile.content}
             size={fullscreenPreviewFile.size}
             path={fullscreenPreviewFile.path}
+            workspacePath={agentDir}
+            initialEditMode={fullscreenPreviewFile.initialEditMode}
             onClose={() => setFullscreenPreviewFile(null)}
             onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+            onRenamed={(newPath, newName) => {
+              setFullscreenPreviewFile(prev => prev ? { ...prev, path: newPath, name: newName, initialEditMode: undefined } : prev);
+              setWorkspaceRefreshTrigger(prev => prev + 1);
+            }}
             onQuoteFile={handleQuoteFile}
             onQuoteSelection={handleQuoteFileSelection}
           />

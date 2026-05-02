@@ -7,6 +7,7 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  NotebookPen,
   Pencil,
   RefreshCw,
   SlidersHorizontal,
@@ -154,13 +155,20 @@ interface DirectoryPanelProps {
   /** Copy a project skill to global skills */
   onSyncSkillToGlobal?: (folderName: string) => void;
   /** When provided, file clicks route to this callback instead of opening the modal.
-   *  Used by split-view mode (experimentalSplitView) to open files in a side panel. */
-  onFilePreviewExternal?: (file: {
-    name: string;
-    content: string;
-    size: number;
-    path: string;
-  }) => void;
+   *  Used by split-view mode (experimentalSplitView) to open files in a side panel.
+   *
+   *  `options.initialEditMode` is set by 「新建笔记」 so the freshly-created
+   *  empty `note-…md` opens directly in the editable Monaco view instead of
+   *  the rendered-preview empty-state. */
+  onFilePreviewExternal?: (
+    file: {
+      name: string;
+      content: string;
+      size: number;
+      path: string;
+    },
+    options?: { initialEditMode?: boolean },
+  ) => void;
   /** Open embedded terminal in split panel */
   onOpenTerminal?: () => void;
   /** Whether an embedded terminal is currently alive (for indicator display) */
@@ -174,6 +182,10 @@ type FilePreview = {
   content: string;
   size: number;
   path: string;
+  /** When set, FilePreviewModal opens in markdown edit mode directly.
+   *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
+   *  preview empty-state and lands the cursor in Monaco. */
+  initialEditMode?: boolean;
 };
 
 type ContextMenuState = {
@@ -1222,6 +1234,78 @@ const DirectoryPanel = memo(
       }
     };
 
+    /** 「新建笔记」: pick the next free `note-YYYYMMDDHHMM[-N].md` slot in
+     *  `parentDir`, create it empty, then open the preview directly in
+     *  edit mode (Obsidian-like quick-capture flow). Local time — the
+     *  user expects "now" to be wall-clock now, not UTC.
+     *
+     *  Collision handling: probe up to 30 candidates via `checkPaths`
+     *  (single batched invoke), pick the first free one. The cap is
+     *  arbitrary but well above any plausible "I created 30 notes in one
+     *  minute" workflow; treats overflow as an error toast rather than
+     *  silently dropping the click. */
+    const handleNewNote = async (parentDir: string) => {
+      if (!fileService.isAvailable) return;
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const stamp =
+        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+        `${pad(now.getHours())}${pad(now.getMinutes())}`;
+      const baseStem = `note-${stamp}`;
+      const candidates = [
+        `${baseStem}.md`,
+        ...Array.from({ length: 29 }, (_, i) => `${baseStem}-${i + 2}.md`),
+      ];
+      const probePaths = candidates.map((n) =>
+        parentDir ? `${parentDir}/${n}` : n,
+      );
+      try {
+        const probe = await fileService.checkPaths({ paths: probePaths });
+        const firstFree = candidates.findIndex(
+          (_, i) => !probe.results[probePaths[i]]?.exists,
+        );
+        if (firstFree < 0) {
+          setError("当前分钟内已有过多笔记，请稍后再试");
+          return;
+        }
+        const filename = candidates[firstFree];
+        const created = await fileService.newFile({
+          parentDir,
+          name: filename,
+        });
+        // Watcher refresh will surface the new file; we also kick a manual
+        // refresh so the highlight + selection are immediate.
+        refresh();
+
+        // Synthesize a tree-node so selectedNodes highlights the new file
+        // even before the watcher-driven re-fetch resolves.
+        const newNode: DirectoryTreeNode = {
+          id: created.path,
+          name: filename,
+          path: created.path,
+          type: "file",
+        };
+        setSelectedNodes([newNode]);
+
+        // Open preview in edit mode. Split-view (Chat) routes via the
+        // external callback; otherwise open the inline modal.
+        const previewFile = {
+          name: filename,
+          content: "",
+          size: 0,
+          path: created.path,
+        };
+        if (onFilePreviewExternal) {
+          onFilePreviewExternal(previewFile, { initialEditMode: true });
+        } else {
+          setPreview({ ...previewFile, initialEditMode: true });
+          setPreviewError(null);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Create failed");
+      }
+    };
+
     const handleNewFolder = async (parentDir: string, name: string) => {
       try {
         await fileService.newFolder({ parentDir, name });
@@ -1365,6 +1449,11 @@ const DirectoryPanel = memo(
       if (!node) {
         return [
           {
+            label: "新建笔记",
+            icon: <NotebookPen className="h-4 w-4" />,
+            onClick: () => void handleNewNote(""),
+          },
+          {
             label: "导入文件",
             icon: <Upload className="h-4 w-4" />,
             onClick: () => {
@@ -1399,6 +1488,11 @@ const DirectoryPanel = memo(
 
       if (isDir) {
         return [
+          {
+            label: "新建笔记",
+            icon: <NotebookPen className="h-4 w-4" />,
+            onClick: () => void handleNewNote(node.path),
+          },
           {
             label: "新建文件",
             icon: <FilePlus className="h-4 w-4" />,
@@ -2038,11 +2132,21 @@ const DirectoryPanel = memo(
                 // Phase D.5: thread the absolute workspace root so rendered
                 // markdown previews can load relative-path images.
                 workspacePath={agentDir}
+                initialEditMode={preview?.initialEditMode}
                 onClose={() => {
                   setPreview(null);
                   setPreviewError(null);
                 }}
                 onSaved={refresh}
+                onRenamed={(newPath, newName) => {
+                  // Update the preview state so subsequent saves target the
+                  // new path. The fs watcher triggers a tree refresh on its
+                  // own (rename → delete-old + create-new event pair).
+                  setPreview((prev) =>
+                    prev ? { ...prev, path: newPath, name: newName, initialEditMode: undefined } : prev,
+                  );
+                  refresh();
+                }}
                 // Phase D.5: route reveal through fileService rather than the
                 // modal falling back to sidecar `/agent/open-in-finder`.
                 onRevealFile={async () => {
