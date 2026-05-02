@@ -185,7 +185,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let dest_path = dst.join(entry.file_name());
         if metadata.is_symlink() {
             // Skip symlinks to avoid escaping the source tree. Mirrors the
-            // sidecar `merge_dir_recursive` behavior.
+            // sidecar `merge_dir_recursive` behavior. Cross-review round 2
+            // (Codex LOW-1): silent skip can drop legitimate symlinks
+            // (npm `node_modules/.bin`, virtualenv `python` link); user
+            // discovers files missing in the copied tree without a hint.
+            // Log so a grep of unified.log surfaces the skipped paths.
+            crate::ulog_warn!(
+                "[workspace_files::transfer] skipped symlink {} (copy_dir_recursive does not follow links)",
+                entry.path().display()
+            );
             continue;
         } else if metadata.is_dir() {
             copy_dir_recursive(&entry.path(), &dest_path)?;

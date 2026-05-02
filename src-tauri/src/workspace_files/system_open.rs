@@ -78,8 +78,17 @@ pub async fn cmd_open_path_external(full_path: String) -> Result<SystemOpenResul
 }
 
 /// Validate that `full_path` (absolute) canonicalizes to somewhere safe to
-/// reveal in the OS file manager: under home_dir or tmp_dir, and the path
-/// must currently exist. Returns the canonical path on success.
+/// reveal in the OS file manager: under home_dir or tmp_dir, NOT under any
+/// credential / system blacklist (`~/.ssh`, `~/.aws`, `Library/Keychains`,
+/// etc.), and the path must currently exist. Returns the canonical path on
+/// success.
+///
+/// Cross-review round 2 (Codex MED-1): the home/tmp prefix check alone is
+/// insufficient — `~/.ssh/id_rsa` lives under home and would slip through.
+/// Additionally calling `validate_file_path` (the project-wide credential
+/// blacklist used by templates / sidecar) closes that gap. The sidecar
+/// `/agent/open-path` did NOT have this guard; this is a deliberate
+/// hardening over the original behavior.
 fn validate_external_open_path(full_path: &str) -> Result<PathBuf, String> {
     let target = PathBuf::from(full_path);
     if !target.is_absolute() {
@@ -101,6 +110,12 @@ fn validate_external_open_path(full_path: &str) -> Result<PathBuf, String> {
     // escape into /etc via a tmp/home-shaped lure.
     if !canonical.starts_with(&canonical_home) && !canonical.starts_with(&canonical_tmp) {
         return Err("Path not allowed".to_string());
+    }
+    // Apply the project-wide credential / system blacklist on the
+    // canonicalized path — blocks `~/.ssh`, `~/.gnupg`, `~/.aws`, Library/
+    // Keychains, Library/Cookies, etc. even though the home prefix passed.
+    if let Some(s) = canonical.to_str() {
+        crate::commands::validate_file_path(s)?;
     }
     Ok(canonical)
 }
@@ -274,6 +289,41 @@ mod tests {
         let res = validate_external_open_path("/etc/hosts");
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("not allowed"));
+    }
+
+    // Cross-review round 2 (Codex MED-1): `~/.ssh/id_rsa` passes the
+    // home-prefix check but MUST be blocked by the credential blacklist.
+    // Reveal-in-finder would otherwise let a malicious AI tool / skill emit
+    // a button that opens Finder on a private key — left-clicking it could
+    // open the file in TextEdit and surface the secret on screen.
+    #[cfg(unix)]
+    #[test]
+    fn validate_external_open_blocks_ssh_dir() {
+        // Write a stub file under `~/.ssh`. If the user already has a real
+        // ~/.ssh with sensitive contents we don't want to touch it; create a
+        // unique-named stub instead.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let Some(home) = home else { return };
+        let ssh_dir = home.join(".ssh");
+        let stub = ssh_dir.join(format!(
+            "myagents_test_stub_{}",
+            std::process::id()
+        ));
+        // Skip if we can't create (no .ssh dir, permission, etc.) — rather
+        // than trying to mkdir which would touch real config.
+        if !ssh_dir.is_dir() {
+            return;
+        }
+        if std::fs::write(&stub, b"x").is_err() {
+            return;
+        }
+        let res = validate_external_open_path(stub.to_string_lossy().as_ref());
+        let _ = std::fs::remove_file(&stub);
+        assert!(
+            res.is_err(),
+            "~/.ssh/<stub> must be blocked by credential blacklist; got {:?}",
+            res
+        );
     }
 
     // Symlink ESCAPE from a tmp-shaped lure: a tmp file linking to /etc/hosts

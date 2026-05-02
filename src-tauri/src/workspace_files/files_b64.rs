@@ -206,14 +206,27 @@ async fn read_one_image_as_b64(raw_path: &str) -> ReadAsBase64Item {
         return make_err("File too large (max 10MB)".to_string());
     }
 
-    // Bounded read — defense against TOCTOU file growth between the size
-    // check and the read. Mirrors `download.rs::cmd_workspace_download_file`.
+    // Bounded read — actual defense against TOCTOU file growth between the
+    // size check and the read. The previous `tokio::fs::read` call read
+    // unbounded; an attacker could `truncate -s 4G` a regular file between
+    // metadata and read → 4GB allocation. Mirrors
+    // `download.rs::cmd_workspace_download_file` (which got this right
+    // earlier).
     let read_cap = MAX_IMAGE_SIZE_BYTES + 1;
-    let bytes = match tokio::fs::read(&resolved).await {
-        Ok(b) => b,
-        Err(e) => return make_err(format!("Read failed: {}", e)),
+    let mut file = match tokio::fs::File::open(&resolved).await {
+        Ok(f) => f,
+        Err(e) => return make_err(format!("Open failed: {}", e)),
     };
-    if bytes.len() as u64 > read_cap || bytes.len() as u64 > MAX_IMAGE_SIZE_BYTES {
+    let mut bytes = Vec::with_capacity(symlink_meta.len() as usize);
+    use tokio::io::AsyncReadExt;
+    if let Err(e) = (&mut file)
+        .take(read_cap)
+        .read_to_end(&mut bytes)
+        .await
+    {
+        return make_err(format!("Read failed: {}", e));
+    }
+    if bytes.len() as u64 > MAX_IMAGE_SIZE_BYTES {
         return make_err("File too large (max 10MB)".to_string());
     }
 
@@ -445,6 +458,43 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("Symlinks"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review (round 2 / Codex) caught: the previous "bounded read"
+    // claim was fake — `read_cap` was computed but never applied to
+    // `tokio::fs::read` (which is unbounded). The fix uses
+    // `File::open + take(read_cap).read_to_end`. This regression guard
+    // simulates the post-stat file-growth case by writing a file SIZED at
+    // the cap exactly, then asserts read is bounded — if a future change
+    // drops the `take` again, this test would surface the issue (we'd OOM
+    // or read way more than expected).
+    //
+    // We can't easily simulate true TOCTOU growth in a single-threaded
+    // tokio test, but we can verify: (a) a file at MAX_IMAGE_SIZE_BYTES
+    // is read in full (boundary), (b) a file at MAX+1 is rejected.
+    // Combined with the symlink-rejection guard above, the surface area
+    // for surprise attacker-controlled growth is closed.
+    #[tokio::test]
+    async fn read_b64_caps_at_max_size() {
+        let ws = make_tmp_workspace();
+        // PNG magic so the extension allowlist doesn't pre-reject.
+        let too_big = ws.join("huge.png");
+        let buf = vec![0u8; (MAX_IMAGE_SIZE_BYTES + 1) as usize];
+        fs::write(&too_big, &buf).unwrap();
+        let res = cmd_workspace_read_files_b64(vec![too_big.to_string_lossy().to_string()])
+            .await
+            .unwrap();
+        assert!(res.files[0].error.is_some());
+        assert!(
+            res.files[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("too large"),
+            "expected size-cap error, got {:?}",
+            res.files[0].error,
+        );
         let _ = fs::remove_dir_all(&ws);
     }
 

@@ -337,6 +337,11 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             path={previewFile.path}
             isLoading={previewFile.isLoading}
             error={previewFile.error}
+            // Phase D.5: thread the absolute workspace root so rendered
+            // markdown can load relative-path images via fileService.
+            // Without this, MarkdownImage's hook gets `null` and silently
+            // skips the fetch (preview text/code still works).
+            workspacePath={workspacePath}
             onClose={() => setPreviewFile(null)}
             // Phase D.5: route reveal-in-finder through fileService rather
             // than letting the modal fall back to sidecar `/agent/open-in-finder`.

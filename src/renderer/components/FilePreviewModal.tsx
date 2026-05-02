@@ -65,6 +65,11 @@ interface FilePreviewModalProps {
     onSave?: (content: string) => Promise<void>;
     /** External reveal-in-finder handler — enables "Open in Finder" without Tab context */
     onRevealFile?: () => Promise<void>;
+    /** Absolute workspace root path — Phase D.5: required for rendered
+     *  markdown to load relative-path images via `useWorkspaceFileService`.
+     *  When omitted, embedded images in markdown won't load (the modal's
+     *  text/code preview still works fine). */
+    workspacePath?: string | null;
     /** When true, render inline (no portal/backdrop) for use in split-view panel */
     embedded?: boolean;
     /** Callback to open the fullscreen modal from embedded mode.
@@ -178,6 +183,7 @@ export default function FilePreviewModal({
     onSaved,
     onSave,
     onRevealFile,
+    workspacePath = null,
     embedded = false,
     onFullscreen,
     onSwitchToBrowser,
@@ -530,7 +536,7 @@ export default function FilePreviewModal({
             return (
                 <div className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
                     <div className="prose prose-stone mx-auto max-w-3xl dark:prose-invert">
-                        <Markdown raw preserveNewlines basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{previewSource}</Markdown>
+                        <Markdown raw preserveNewlines basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined} workspacePath={workspacePath}>{previewSource}</Markdown>
                     </div>
                 </div>
             );

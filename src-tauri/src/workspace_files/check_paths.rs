@@ -19,19 +19,22 @@
 //! matches the sidecar fallback so a single bad path doesn't poison the
 //! cache for the others.
 //!
-//! `Path::exists()` is sufficient here: we only need to know "is there any
-//! directory entry at this resolved path" — broken-symlink false-negative is
-//! actually the *desired* behavior (a broken symlink shouldn't get a clickable
-//! preview affordance). For the destructive-operation pit-of-success rule
-//! we use `symlink_metadata` (see `crud.rs::slot_occupied`); this is the
-//! read-only / preview side and the policies are different.
+//! Cross-review round 2 (Codex MED-3): we use
+//! `resolve_existing_inside_workspace` (canonicalize + prefix-check), the
+//! same gate as `read_preview` and `download_file`. Without this, an
+//! `evil_link → /etc/passwd` inside the workspace would report
+//! `{exists:true, type:'file'}` here — the renderer turns that into a
+//! clickable preview chip, the user clicks, and the read command rejects
+//! with "Path escapes workspace via symlink". Surfacing the rejection as
+//! `{exists:false}` here keeps the chip from appearing in the first place.
+//! Broken symlinks (canonicalize fails → "File not found") collapse to
+//! `{exists:false}` which is also the desired UI behavior.
 
 use std::collections::HashMap;
-use std::fs;
 
 use serde::Serialize;
 
-use super::path_safety::{resolve_inside_workspace, validate_workspace_root};
+use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 
 /// Hard cap on inputs — matches sidecar `/agent/check-paths` (200) so a typo
 /// in renderer code can't fan out an unbounded `stat()` storm.
@@ -81,7 +84,11 @@ fn check_one(workspace_root: &std::path::Path, raw: &str) -> PathInfo {
             kind: "file".to_string(),
         };
     }
-    let resolved = match resolve_inside_workspace(workspace_root, trimmed) {
+    // Use the canonical resolver — same gate as `read_preview`/`download_file`.
+    // Symlinks escaping the workspace, broken symlinks, traversal escapes,
+    // and missing files all collapse to `{exists:false, type:'file'}` so the
+    // renderer's inline-code chip stays consistent with the read commands.
+    let resolved = match resolve_existing_inside_workspace(workspace_root, trimmed) {
         Ok(p) => p,
         Err(_) => {
             return PathInfo {
@@ -90,7 +97,10 @@ fn check_one(workspace_root: &std::path::Path, raw: &str) -> PathInfo {
             }
         }
     };
-    match fs::metadata(&resolved) {
+    // `resolved` is canonicalized, so this metadata call follows no further
+    // links. We use `metadata` (not `symlink_metadata`) on purpose: the
+    // canonical path is already the real file/dir.
+    match std::fs::metadata(&resolved) {
         Ok(m) if m.is_dir() => PathInfo {
             exists: true,
             kind: "dir".to_string(),
@@ -192,6 +202,38 @@ mod tests {
         assert_eq!(res.results.get("").unwrap().exists, false);
         assert_eq!(res.results.get("  ").unwrap().exists, false);
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review round 2 (Codex MED-3): a workspace-internal symlink
+    // pointing to /etc/... must report exists:false here, otherwise the
+    // renderer's inline-code chip is clickable but the click → read_preview
+    // rejects with "Path escapes workspace via symlink". Aligns with read
+    // command behavior.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_escape_as_not_found() {
+        use std::os::unix::fs::symlink;
+        let ws = make_test_workspace("check_paths_symlink_escape");
+        let outside = std::env::temp_dir().join(format!(
+            "check_outside_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("secret.txt");
+        fs::write(&target, "secret").unwrap();
+        symlink(&target, ws.join("evil_link.txt")).unwrap();
+
+        let res = cmd_workspace_check_paths(
+            ws.to_string_lossy().to_string(),
+            vec!["evil_link.txt".to_string()],
+        )
+        .await
+        .unwrap();
+        // Surfaces as not-found rather than exists:true — chip won't appear,
+        // user can't click to fail later.
+        assert_eq!(res.results.get("evil_link.txt").unwrap().exists, false);
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     // The renderer uses the input path string as a cache key, so even though

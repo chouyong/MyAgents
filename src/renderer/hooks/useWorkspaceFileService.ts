@@ -161,61 +161,94 @@ interface GitignoreResult {
   reason: string;
 }
 
+/**
+ * `WorkspaceFileService` exposes Rust workspace_files commands as a stable
+ * callable surface.
+ *
+ * # Methods that REQUIRE a workspace (throw "请先选择工作区" if `workspacePath`
+ * is null):
+ * `importBase64Files`, `copyPaths`, `addGitignore`, `searchFiles`,
+ * `deleteFile`, `listSlashCommands`, `dirTree`, `dirExpand`, `readPreview`,
+ * `downloadFile`, `newFile`, `newFolder`, `rename`, `movePaths`,
+ * `openInFinder`, `openWithDefault`, `readFileAsBlobUrl`, `gitBranch`,
+ * `watchStart`, `checkPaths`.
+ *
+ * # Methods that DO NOT require a workspace (callable with `useWorkspaceFileService(null)`):
+ * `openPathExternal` (takes absolute path), `readPathsAsBase64` (takes
+ * absolute paths from drag-drop), `watchStop` (takes opaque token).
+ *
+ * Cross-review round 2 (Codex HIGH-3): consumers like SkillDetailPanel /
+ * CommandDetailPanel pass `null` because they only need workspace-free
+ * methods. Adding a workspace-required method to those panels would throw
+ * at runtime — the JSDoc above is the source-of-truth for which methods
+ * are safe to call when the hook was instantiated with `null`.
+ */
 export interface WorkspaceFileService {
-  /** Import base64-encoded files into `<workspace>/<targetDir>/`. */
+  /** [requires workspace] Import base64-encoded files into `<workspace>/<targetDir>/`. */
   importBase64Files(args: {
     files: { name: string; content: string }[];
     targetDir?: string;
   }): Promise<ImportResult>;
-  /** Copy absolute paths (drag-drop / file picker) into `<workspace>/<targetDir>/`. */
+  /** [requires workspace] Copy absolute paths (drag-drop / file picker) into `<workspace>/<targetDir>/`. */
   copyPaths(args: {
     sourcePaths: string[];
     targetDir: string;
     autoRename?: boolean;
   }): Promise<CopyResult>;
-  /** Read absolute image paths and return base64 (for Tauri image drops). */
+  /** [workspace-free] Read absolute image paths and return base64 (for Tauri image drops). */
   readPathsAsBase64(args: { paths: string[] }): Promise<ReadAsBase64Response>;
-  /** Append a pattern to `<workspace>/.gitignore` if not already present. */
+  /** [requires workspace] Append a pattern to `<workspace>/.gitignore` if not already present. */
   addGitignore(args: { pattern: string }): Promise<GitignoreResult>;
-  /** Fuzzy file-name search for the @ mention picker. */
+  /** [requires workspace] Fuzzy file-name search for the @ mention picker. */
   searchFiles(args: { query: string }): Promise<FileSearchResult[]>;
-  /** Delete a workspace-relative path (file / dir / broken symlink). */
+  /** [requires workspace] Delete a workspace-relative path (file / dir / broken symlink). */
   deleteFile(args: { path: string }): Promise<DeleteResult>;
-  /** List slash-command picker entries — global + project skills + builtins. */
+  /** [requires workspace] List slash-command picker entries — global + project skills + builtins. */
   listSlashCommands(): Promise<SlashCommandsResponse>;
   // ─── Phase D: DirectoryPanel ops ───
-  /** Initial directory tree walk (depth + entry capped on the Rust side). */
+  /** [requires workspace] Initial directory tree walk (depth + entry capped on the Rust side). */
   dirTree(): Promise<DirectoryTreeResult>;
-  /** Lazy-expand a single directory marked `loaded:false` in the tree. */
+  /** [requires workspace] Lazy-expand a single directory marked `loaded:false` in the tree. */
   dirExpand(args: { path: string }): Promise<ExpandDirectoryResult>;
-  /** Read a previewable text file for the preview modal (≤512KB). */
+  /** [requires workspace] Read a previewable text file for the preview modal (≤512KB). */
   readPreview(args: { path: string }): Promise<PreviewResult>;
-  /** Read a binary file (image, etc.) as base64 for blob reconstruction. */
+  /** [requires workspace] Read a binary file (image, etc.) as base64 for blob reconstruction. */
   downloadFile(args: { path: string }): Promise<DownloadResult>;
+  /** [requires workspace] */
   newFile(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
+  /** [requires workspace] */
   newFolder(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
+  /** [requires workspace] */
   rename(args: { oldPath: string; newName: string }): Promise<RenameResult>;
+  /** [requires workspace] */
   movePaths(args: { sourcePaths: string[]; targetDir: string }): Promise<MoveResult>;
+  /** [requires workspace] */
   openInFinder(args: { path: string }): Promise<void>;
+  /** [requires workspace] */
   openWithDefault(args: { path: string }): Promise<void>;
-  /** Reveal an absolute path (NOT workspace-relative) in the OS file manager.
-   *  Used by Skill/Command detail panels for `~/.myagents/skills/...`. The
-   *  Rust side validates the path canonicalizes to under home_dir or tmp. */
+  /** [workspace-free] Reveal an absolute path (NOT workspace-relative) in the
+   *  OS file manager. Used by Skill/Command detail panels for
+   *  `~/.myagents/skills/...`. The Rust side validates the path canonicalizes
+   *  to under home_dir or tmp AND passes the credential blacklist. */
   openPathExternal(args: { fullPath: string }): Promise<void>;
-  /** Batch existence check — input order is preserved in the returned map. */
+  /** [requires workspace] Batch existence check — input order is preserved in the returned map. */
   checkPaths(args: { paths: string[] }): Promise<CheckPathsResult>;
-  /** Read a workspace file as a Blob URL (for `<img src=...>` in AI markdown
-   *  / inline-code preview). Returns `{ blobUrl, mimeType, name, revoke }`.
-   *  Caller MUST call `revoke()` on cleanup to free the object URL. */
+  /** [requires workspace] Read a workspace file as a Blob URL (for `<img src=...>`
+   *  in AI markdown / inline-code preview). Returns `{ blobUrl, mimeType,
+   *  name, revoke }`. Caller MUST call `revoke()` on cleanup to free the
+   *  object URL. */
   readFileAsBlobUrl(args: { path: string }): Promise<BlobUrlHandle>;
+  /** [requires workspace] */
   gitBranch(): Promise<GitBranchResult>;
-  /** Start the per-workspace fs watcher (ref-counted process-wide). Returns
-   *  `{ token, eventKey }`: the renderer holds `token` for the lifetime of the
-   *  watch and passes it to `watchStop`; `eventKey` is the suffix to subscribe
-   *  to via Tauri `listen('workspace:files-changed:<eventKey>', ...)`. */
+  /** [requires workspace] Start the per-workspace fs watcher (ref-counted
+   *  process-wide). Returns `{ token, eventKey }`: the renderer holds `token`
+   *  for the lifetime of the watch and passes it to `watchStop`; `eventKey`
+   *  is the suffix to subscribe to via Tauri
+   *  `listen('workspace:files-changed:<eventKey>', ...)`. */
   watchStart(): Promise<WatchHandle>;
-  /** Release a watch handle issued by `watchStart`. Bad/stale tokens are a
-   *  no-op (matches the "stop is best-effort" contract on the Rust side). */
+  /** [workspace-free] Release a watch handle issued by `watchStart`. Bad/stale
+   *  tokens are a no-op (matches the "stop is best-effort" contract on the
+   *  Rust side). */
   watchStop(args: { token: string }): Promise<void>;
   /** Whether the current environment supports these calls. False in browser dev mode. */
   isAvailable: boolean;

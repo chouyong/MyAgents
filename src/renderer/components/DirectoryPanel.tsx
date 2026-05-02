@@ -2035,6 +2035,9 @@ const DirectoryPanel = memo(
                 path={preview?.path ?? ""}
                 isLoading={isPreviewLoading}
                 error={previewError}
+                // Phase D.5: thread the absolute workspace root so rendered
+                // markdown previews can load relative-path images.
+                workspacePath={agentDir}
                 onClose={() => {
                   setPreview(null);
                   setPreviewError(null);
