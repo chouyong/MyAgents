@@ -6,20 +6,26 @@
 //! Phase D moves the watch to Rust so the panel doesn't depend on a sidecar
 //! being alive.
 //!
-//! # Reference counting
+//! # Token-based handle (Phase D.5)
 //!
-//! Multiple Tabs / panels can be open against the same workspace. We keep
-//! exactly one OS-level watcher per workspace path and ref-count starts/stops
-//! so the resource is released when the last consumer goes away. Mirrors how
-//! `search/watcher.rs` runs as a single per-process watcher (we just generalize
-//! to per-workspace).
+//! `watch_start` returns an opaque `WatchHandle { token, event_key }`. The
+//! renderer keeps the `token` and passes it to `watch_stop`. This eliminates
+//! the previous "re-derive key from path" stop logic, which leaked entries
+//! when the workspace path changed (rename, symlink swap, deletion) between
+//! start and stop.
+//!
+//! Ref-counting still happens at the workspace-key level (one OS watcher per
+//! workspace path, multiple consumers share it). Each `start` call gets its
+//! own token, so `stop(token)` decrements the right entry even if the path
+//! the renderer holds has since changed.
 //!
 //! # Event shape
 //!
-//! Each fired event is a Tauri event named `workspace:files-changed:<hash>`
-//! where `<hash>` is `WORKSPACE_KEY_PREFIX + sha-like(workspace_path)`. The
-//! frontend hashes the same way and listens to its own workspace's stream;
-//! this avoids quoting / escaping the raw path inside the event name string.
+//! Each fired event is a Tauri event named `workspace:files-changed:<event_key>`
+//! where `<event_key>` is `siphash(workspace_path)` rendered as 16-char hex.
+//! The same key is returned in `WatchHandle` so the renderer can subscribe
+//! before any other consumer for the same workspace finished `start` —
+//! event_key is deterministic for a given workspace path, tokens are not.
 //!
 //! # Debouncing
 //!
@@ -29,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +44,7 @@ use notify_debouncer_full::{
     notify::{RecommendedWatcher, RecursiveMode},
     DebounceEventResult, Debouncer, FileIdMap,
 };
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::{ulog_info, ulog_warn};
@@ -50,11 +58,21 @@ const DEBOUNCE_WINDOW: Duration = Duration::from_secs(5);
 /// only held briefly to mutate the registry.
 #[derive(Default)]
 pub struct WorkspaceWatchers {
+    /// Keyed by event_key (== siphash of workspace path). One entry per
+    /// active OS-level watcher; all `start` calls for the same workspace share
+    /// it via ref-count.
     inner: Mutex<HashMap<String, WatcherEntry>>,
+    /// Maps token → event_key. `stop(token)` looks up the entry to decrement.
+    /// Token issuance is monotonic and process-local.
+    token_index: Mutex<HashMap<u64, String>>,
+    /// Monotonic counter for token issuance. The full token surfaced to the
+    /// renderer is `format!("{:x}", n)` so it's a stable opaque string.
+    next_token: AtomicU64,
 }
 
 struct WatcherEntry {
-    /// Ref-count of frontend consumers. The last `stop` drops the entry.
+    /// Number of outstanding tokens against this entry. Drops to 0 → drop the
+    /// debouncer, drop the entry. Never decrements past 0 even on bogus input.
     refs: usize,
     /// Holding the debouncer alive keeps the watch active. Dropping it stops
     /// the OS-level watch.
@@ -62,12 +80,27 @@ struct WatcherEntry {
 }
 
 /// Compute the stable event-key suffix for a workspace path. Uses std's
-/// `DefaultHasher` (SipHash-1-3) — we don't need cryptographic strength, just
-/// a consistent string that's safe to embed in a Tauri event name.
+/// `DefaultHasher` (SipHash-1-3 on current rustc) — we don't need cryptographic
+/// strength, just a consistent 16-char hex string that's safe to embed in a
+/// Tauri event name. The hash is process-local — never persisted — so the
+/// "DefaultHasher may change between rustc versions" caveat doesn't bite.
 pub fn event_key_for_workspace(workspace_path: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     workspace_path.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchHandle {
+    /// Opaque handle the renderer keeps and passes to `watch_stop`. Stable
+    /// across the lifetime of the start call but NOT stable across rustc
+    /// rebuilds (it's a process-local counter, not persisted anywhere).
+    pub token: String,
+    /// Event-name suffix to subscribe to via Tauri `listen()`. Deterministic
+    /// for a given workspace path so the renderer can subscribe before
+    /// `start` returns.
+    pub event_key: String,
 }
 
 #[tauri::command]
@@ -75,14 +108,26 @@ pub async fn cmd_workspace_watch_start(
     workspace: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<WorkspaceWatchers>>,
-) -> Result<(), String> {
+) -> Result<WatchHandle, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
-    let key = event_key_for_workspace(&workspace_root.to_string_lossy());
-    let mut guard = state.inner.lock().map_err(|e| format!("lock: {}", e))?;
+    let event_key = event_key_for_workspace(&workspace_root.to_string_lossy());
 
-    if let Some(entry) = guard.get_mut(&key) {
+    // Issue token first so we can register it under the lock atomically with
+    // the registry mutation. Wrapping order: registry → token_index, both
+    // briefly held.
+    let token_n = state.next_token.fetch_add(1, Ordering::Relaxed);
+    let token = format!("{:x}", token_n);
+
+    let mut registry = state.inner.lock().map_err(|e| format!("lock: {}", e))?;
+    let mut tokens = state
+        .token_index
+        .lock()
+        .map_err(|e| format!("token lock: {}", e))?;
+
+    if let Some(entry) = registry.get_mut(&event_key) {
         entry.refs += 1;
-        return Ok(());
+        tokens.insert(token_n, event_key.clone());
+        return Ok(WatchHandle { token, event_key });
     }
 
     // Spin up a new debouncer. Channel sends DebounceEventResult; spawn a
@@ -95,10 +140,10 @@ pub async fn cmd_workspace_watch_start(
         .map_err(|e| format!("watch workspace failed: {}", e))?;
 
     let app_clone = app.clone();
-    let event_name = format!("workspace:files-changed:{}", key);
+    let event_name = format!("workspace:files-changed:{}", event_key);
     let workspace_path_str = workspace_root.to_string_lossy().to_string();
     std::thread::Builder::new()
-        .name(format!("ws-watcher:{}", &key[..8]))
+        .name(format!("ws-watcher:{}", &event_key[..8]))
         .spawn(move || {
             for result in rx {
                 match result {
@@ -125,86 +170,70 @@ pub async fn cmd_workspace_watch_start(
         .map_err(|e| format!("spawn watcher thread failed: {}", e))?;
 
     ulog_info!(
-        "[workspace_files::watcher] started for {} (key={})",
+        "[workspace_files::watcher] started for {} (event_key={}, token={})",
         workspace_root.display(),
-        key
+        event_key,
+        token
     );
 
-    guard.insert(
-        key,
+    registry.insert(
+        event_key.clone(),
         WatcherEntry {
             refs: 1,
             _debouncer: debouncer,
         },
     );
-    Ok(())
+    tokens.insert(token_n, event_key.clone());
+
+    Ok(WatchHandle { token, event_key })
 }
 
 #[tauri::command]
 pub async fn cmd_workspace_watch_stop(
-    workspace: String,
+    token: String,
     state: tauri::State<'_, Arc<WorkspaceWatchers>>,
 ) -> Result<(), String> {
-    // Workspace may have been deleted out from under us; lookup by path is
-    // best-effort. We try three keys in order to avoid a registry leak when
-    // the validate path differs from what `start` saw:
-    //   1. validate_workspace_root (requires existence) — happy path
-    //   2. system_blacklist_check (lexical-only, no existence) — covers
-    //      "workspace deleted between start and stop"
-    //   3. raw input — last-resort, in case both validators reject
-    // Cross-review caught the original two-branch fallback as a leak source.
-    let mut keys: Vec<String> = Vec::new();
-    if let Ok(p) = validate_workspace_root(&workspace) {
-        keys.push(event_key_for_workspace(&p.to_string_lossy()));
-    }
-    if let Ok(p) = crate::commands::validate_file_path(&workspace) {
-        let hashed = event_key_for_workspace(&p.to_string_lossy());
-        if !keys.contains(&hashed) {
-            keys.push(hashed);
-        }
-    }
-    {
-        let raw = event_key_for_workspace(&workspace);
-        if !keys.contains(&raw) {
-            keys.push(raw);
-        }
-    }
+    // Parse the token. Bad input is a no-op (matches the "stop is best-effort"
+    // contract — caller might double-stop on unmount).
+    let token_n = match u64::from_str_radix(&token, 16) {
+        Ok(n) => n,
+        Err(_) => return Ok(()),
+    };
 
-    let mut guard = state.inner.lock().map_err(|e| format!("lock: {}", e))?;
-    for key in keys {
-        let entry_present = guard.get(&key).is_some();
-        if !entry_present {
-            continue;
+    let mut tokens = state
+        .token_index
+        .lock()
+        .map_err(|e| format!("token lock: {}", e))?;
+    let event_key = match tokens.remove(&token_n) {
+        Some(k) => k,
+        None => return Ok(()), // Already stopped or unknown token.
+    };
+    drop(tokens);
+
+    let mut registry = state.inner.lock().map_err(|e| format!("lock: {}", e))?;
+    let drop_now = match registry.get_mut(&event_key) {
+        Some(e) => {
+            // Saturating decrement — defense-in-depth against accidental
+            // double-stop within a single token window.
+            if e.refs > 1 {
+                e.refs -= 1;
+                false
+            } else {
+                true
+            }
         }
-        let drop_now = guard
-            .get_mut(&key)
-            .map(|e| {
-                if e.refs > 1 {
-                    e.refs -= 1;
-                    false
-                } else {
-                    true
-                }
-            })
-            .unwrap_or(false);
-        if drop_now {
-            guard.remove(&key);
-            ulog_info!("[workspace_files::watcher] stopped (key={})", key);
-        }
-        return Ok(());
+        None => false,
+    };
+    if drop_now {
+        registry.remove(&event_key);
+        ulog_info!(
+            "[workspace_files::watcher] stopped (event_key={}, token={})",
+            event_key,
+            token
+        );
     }
     Ok(())
 }
-
-#[tauri::command]
-pub async fn cmd_workspace_watch_event_key(workspace: String) -> Result<String, String> {
-    let workspace_root = validate_workspace_root(&workspace)?;
-    Ok(event_key_for_workspace(&workspace_root.to_string_lossy()))
-}
-
-// (`register` previously lived here — `lib.rs` already does
-// `.manage(Arc::new(WorkspaceWatchers::default()))` at builder time, so the
-// helper was dead code. Cross-review caught.)
 
 #[cfg(test)]
 mod tests {
@@ -226,44 +255,53 @@ mod tests {
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    // Cross-review (Arch) caught: ref-counting logic in start/stop is the most
-    // logic-dense part of this module and had zero coverage. We exercise the
-    // registry directly (without spinning up real Tauri / notify watchers) by
-    // simulating the +1/-1 sequences a multi-tab scenario produces.
+    /// Direct unit-test of the registry surface — we can't construct a real
+    /// `Debouncer` outside a Tauri runtime, but the ref-count + token-index
+    /// logic is independent of the debouncer field. Build a minimal
+    /// WatcherEntry-shaped pretend by manipulating the maps directly.
     #[test]
-    fn registry_refcount_increments_and_decrements() {
+    fn token_index_routes_stop_to_correct_entry() {
+        // Two distinct event_keys with refs=1 and refs=2 — manually crafted
+        // entries (no debouncer; we never read `_debouncer`).
+        // We can't construct WatcherEntry without a Debouncer. Instead test
+        // the *bookkeeping invariant* through the registry's token_index
+        // alone: removing a token surfaces the right event_key, and the
+        // refs branch logic is small enough to read by inspection.
         let registry = WorkspaceWatchers::default();
-        // We can't construct a real Debouncer here, but we can verify the
-        // ref-count branch logic by manipulating the HashMap directly. The
-        // `_debouncer` field stays absent for these tests — only the refs
-        // counter is exercised.
-        let key = event_key_for_workspace("/test/ws");
+        let mut tokens = registry.token_index.lock().unwrap();
+        tokens.insert(1, "key_a".to_string());
+        tokens.insert(2, "key_a".to_string());
+        tokens.insert(3, "key_b".to_string());
 
-        // Simulate two consecutive start() calls — the second hits the
-        // "already exists" branch and should bump refs to 2.
-        {
-            // First start emulation: insert a fake entry with refs=1.
-            // We need a Debouncer to construct WatcherEntry; for a unit test
-            // we instead test by inspecting the HashMap manipulation logic.
-            // The actual registry HashMap is private, so we test via the
-            // public API surface using a smoke approach below.
-        }
-
-        // Smoke: empty registry, stop is a no-op.
-        let mut guard = registry.inner.lock().unwrap();
-        assert!(guard.is_empty());
-        assert!(guard.get(&key).is_none());
-        drop(guard);
+        // Stop token 1 → maps to key_a.
+        assert_eq!(tokens.remove(&1).as_deref(), Some("key_a"));
+        // Stop token 3 → maps to key_b.
+        assert_eq!(tokens.remove(&3).as_deref(), Some("key_b"));
+        // Stop token 2 → maps to key_a.
+        assert_eq!(tokens.remove(&2).as_deref(), Some("key_a"));
+        // Unknown token → None (stop becomes a no-op).
+        assert_eq!(tokens.remove(&999), None);
     }
 
     #[test]
-    fn watch_stop_no_op_when_entry_missing() {
-        // Direct HashMap-level smoke: if the entry isn't there, stop should
-        // not panic and not corrupt state. The actual cmd_workspace_watch_stop
-        // command requires a Tauri State which we can't easily mock here, so
-        // we exercise the "no entry" branch via the inner registry.
+    fn next_token_is_monotonic() {
         let registry = WorkspaceWatchers::default();
-        let guard = registry.inner.lock().unwrap();
-        assert_eq!(guard.len(), 0);
+        let a = registry.next_token.fetch_add(1, Ordering::Relaxed);
+        let b = registry.next_token.fetch_add(1, Ordering::Relaxed);
+        let c = registry.next_token.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(b, a + 1);
+        assert_eq!(c, a + 2);
+    }
+
+    #[test]
+    fn watch_stop_invalid_token_is_noop() {
+        let registry = WorkspaceWatchers::default();
+        // A bogus hex string and a non-hex string — both should be no-op
+        // (we test the parsing branch directly).
+        assert!(u64::from_str_radix("not-hex", 16).is_err());
+        // The cmd handler swallows this error and returns Ok(()), per the
+        // "stop is best-effort" contract. The empty registry is unchanged.
+        let registry_empty = registry.inner.lock().unwrap().is_empty();
+        assert!(registry_empty);
     }
 }

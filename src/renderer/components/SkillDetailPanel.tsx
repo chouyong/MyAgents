@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useR
 
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
@@ -336,15 +337,19 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
             }
         }, [name, scope, agentDir, onDeleted, api, isInTabContext]);
 
+        // Phase D.5: skill.path is an absolute path (`~/.myagents/skills/<name>/`
+        // for global, `<project>/.claude/skills/<name>/` for project), not a
+        // workspace-relative path — so we use `cmd_open_path_external` which
+        // takes absolute paths and validates them against home/tmp prefix.
+        const fileService = useWorkspaceFileService(null);
         const handleOpenInFinder = useCallback(async () => {
             if (!skill) return;
             try {
-                // Use full path from skill.path which is already correctly resolved by backend
-                await api.post('/agent/open-path', { fullPath: skill.path });
+                await fileService.openPathExternal({ fullPath: skill.path });
             } catch {
                 toastRef.current.error('无法打开目录');
             }
-        }, [skill, api]);
+        }, [skill, fileService]);
 
         if (loading) {
             return (

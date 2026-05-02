@@ -545,22 +545,22 @@ const DirectoryPanel = memo(
       if (!fileService.isAvailable) return;
       let cancelled = false;
       let unlisten: (() => void) | null = null;
-      let started = false;
+      let token: string | null = null;
 
       (async () => {
         try {
-          const eventKey = await fileService.watchEventKey();
-          if (cancelled) return;
-          await fileService.watchStart();
+          // Phase D.5 — single round-trip returns the token (held for stop)
+          // and the eventKey (used for the listen subscription).
+          const handle = await fileService.watchStart();
           if (cancelled) {
-            // Race: unmount fired between the two awaits — release.
-            await fileService.watchStop().catch(() => {});
+            // Race: unmount fired during the await — release immediately.
+            await fileService.watchStop({ token: handle.token }).catch(() => {});
             return;
           }
-          started = true;
+          token = handle.token;
           const { listen } = await import("@tauri-apps/api/event");
           if (cancelled) return;
-          unlisten = await listen(`workspace:files-changed:${eventKey}`, () => {
+          unlisten = await listen(`workspace:files-changed:${handle.eventKey}`, () => {
             // Coarse signal — refresh re-fetches the whole tree (debounced).
             refreshRef.current();
           });
@@ -574,8 +574,8 @@ const DirectoryPanel = memo(
         if (unlisten) {
           unlisten();
         }
-        if (started) {
-          fileService.watchStop().catch(() => {});
+        if (token) {
+          fileService.watchStop({ token }).catch(() => {});
         }
       };
     }, [fileService]);
@@ -2040,6 +2040,13 @@ const DirectoryPanel = memo(
                   setPreviewError(null);
                 }}
                 onSaved={refresh}
+                // Phase D.5: route reveal through fileService rather than the
+                // modal falling back to sidecar `/agent/open-in-finder`.
+                onRevealFile={async () => {
+                  const p = preview?.path;
+                  if (!p) return;
+                  await fileService.openInFinder({ path: p });
+                }}
                 onQuoteFile={onQuoteFile}
                 onQuoteSelection={onQuoteSelection}
               />

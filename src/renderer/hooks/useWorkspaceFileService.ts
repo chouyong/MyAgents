@@ -132,6 +132,24 @@ interface SlashCommandsResponse {
   globalSkillFolderNames: string[];
 }
 
+// Phase D.5 — batch existence check for inline-code paths in AI output.
+interface PathInfo {
+  exists: boolean;
+  type: 'file' | 'dir';
+}
+
+interface CheckPathsResult {
+  results: Record<string, PathInfo>;
+}
+
+// Phase D.5 — token-based watcher handle. The renderer holds `token` for the
+// lifetime of the watch, then passes it to `watchStop`. `eventKey` is the
+// suffix to subscribe to via Tauri `listen()`.
+interface WatchHandle {
+  token: string;
+  eventKey: string;
+}
+
 interface DeleteResult {
   success: boolean;
   deleted: boolean;
@@ -180,20 +198,37 @@ export interface WorkspaceFileService {
   movePaths(args: { sourcePaths: string[]; targetDir: string }): Promise<MoveResult>;
   openInFinder(args: { path: string }): Promise<void>;
   openWithDefault(args: { path: string }): Promise<void>;
+  /** Reveal an absolute path (NOT workspace-relative) in the OS file manager.
+   *  Used by Skill/Command detail panels for `~/.myagents/skills/...`. The
+   *  Rust side validates the path canonicalizes to under home_dir or tmp. */
+  openPathExternal(args: { fullPath: string }): Promise<void>;
+  /** Batch existence check — input order is preserved in the returned map. */
+  checkPaths(args: { paths: string[] }): Promise<CheckPathsResult>;
+  /** Read a workspace file as a Blob URL (for `<img src=...>` in AI markdown
+   *  / inline-code preview). Returns `{ blobUrl, mimeType, name, revoke }`.
+   *  Caller MUST call `revoke()` on cleanup to free the object URL. */
+  readFileAsBlobUrl(args: { path: string }): Promise<BlobUrlHandle>;
   gitBranch(): Promise<GitBranchResult>;
-  /** Start the per-workspace fs watcher (ref-counted process-wide). The
-   *  caller MUST pair this with `watchStop` on unmount/route-change to
-   *  release the watch handle. */
-  watchStart(): Promise<void>;
-  watchStop(): Promise<void>;
-  /** Stable hash key used inside the Tauri event name
-   *  `workspace:files-changed:<key>`. Listen with `listen()` from
-   *  `@tauri-apps/api/event`. */
-  watchEventKey(): Promise<string>;
+  /** Start the per-workspace fs watcher (ref-counted process-wide). Returns
+   *  `{ token, eventKey }`: the renderer holds `token` for the lifetime of the
+   *  watch and passes it to `watchStop`; `eventKey` is the suffix to subscribe
+   *  to via Tauri `listen('workspace:files-changed:<eventKey>', ...)`. */
+  watchStart(): Promise<WatchHandle>;
+  /** Release a watch handle issued by `watchStart`. Bad/stale tokens are a
+   *  no-op (matches the "stop is best-effort" contract on the Rust side). */
+  watchStop(args: { token: string }): Promise<void>;
   /** Whether the current environment supports these calls. False in browser dev mode. */
   isAvailable: boolean;
   /** The workspace path bound to this service. Useful for debug toasts. */
   workspacePath: string | null;
+}
+
+interface BlobUrlHandle {
+  blobUrl: string;
+  mimeType: string;
+  name: string;
+  /** Releases the object URL. Calling more than once is safe. */
+  revoke: () => void;
 }
 
 export function useWorkspaceFileService(workspacePath: string | null): WorkspaceFileService {
@@ -400,6 +435,51 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
+  const openPathExternal: WorkspaceFileService['openPathExternal'] = useCallback(
+    async ({ fullPath }) => {
+      // No workspace required — this command takes an absolute path.
+      await invokeIfTauri<void>('cmd_open_path_external', { fullPath });
+    },
+    [invokeIfTauri],
+  );
+
+  const checkPaths: WorkspaceFileService['checkPaths'] = useCallback(
+    async ({ paths }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<CheckPathsResult>('cmd_workspace_check_paths', {
+        workspace: ws,
+        paths,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const readFileAsBlobUrl: WorkspaceFileService['readFileAsBlobUrl'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      const result = await invokeIfTauri<DownloadResult>('cmd_workspace_download_file', {
+        workspace: ws,
+        path,
+      });
+      // Decode base64 → Uint8Array → Blob → object URL. The Rust side caps
+      // payload at 25MB so this can't blow up the renderer heap. The decoded
+      // intermediate buffer is freed once the Blob takes ownership.
+      const binary = atob(result.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: result.mimeType || 'application/octet-stream' });
+      const blobUrl = URL.createObjectURL(blob);
+      let revoked = false;
+      const revoke = () => {
+        if (revoked) return;
+        revoked = true;
+        URL.revokeObjectURL(blobUrl);
+      };
+      return { blobUrl, mimeType: result.mimeType, name: result.name, revoke };
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
   const gitBranch: WorkspaceFileService['gitBranch'] = useCallback(async () => {
     const ws = requireWorkspace();
     return invokeIfTauri<GitBranchResult>('cmd_workspace_git_branch', { workspace: ws });
@@ -407,18 +487,16 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
 
   const watchStart: WorkspaceFileService['watchStart'] = useCallback(async () => {
     const ws = requireWorkspace();
-    await invokeIfTauri<void>('cmd_workspace_watch_start', { workspace: ws });
+    return invokeIfTauri<WatchHandle>('cmd_workspace_watch_start', { workspace: ws });
   }, [requireWorkspace, invokeIfTauri]);
 
-  const watchStop: WorkspaceFileService['watchStop'] = useCallback(async () => {
-    const ws = requireWorkspace();
-    await invokeIfTauri<void>('cmd_workspace_watch_stop', { workspace: ws });
-  }, [requireWorkspace, invokeIfTauri]);
-
-  const watchEventKey: WorkspaceFileService['watchEventKey'] = useCallback(async () => {
-    const ws = requireWorkspace();
-    return invokeIfTauri<string>('cmd_workspace_watch_event_key', { workspace: ws });
-  }, [requireWorkspace, invokeIfTauri]);
+  const watchStop: WorkspaceFileService['watchStop'] = useCallback(
+    async ({ token }) => {
+      // No workspace required — token is the registry key on the Rust side.
+      await invokeIfTauri<void>('cmd_workspace_watch_stop', { token });
+    },
+    [invokeIfTauri],
+  );
 
   // Wrap the returned object in useMemo so consumers that put `fileService`
   // in `useCallback` deps (e.g. SimpleChatInput's processDroppedFiles,
@@ -446,10 +524,12 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       movePaths,
       openInFinder,
       openWithDefault,
+      openPathExternal,
+      checkPaths,
+      readFileAsBlobUrl,
       gitBranch,
       watchStart,
       watchStop,
-      watchEventKey,
       isAvailable,
       workspacePath,
     }),
@@ -471,10 +551,12 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       movePaths,
       openInFinder,
       openWithDefault,
+      openPathExternal,
+      checkPaths,
+      readFileAsBlobUrl,
       gitBranch,
       watchStart,
       watchStop,
-      watchEventKey,
       isAvailable,
       workspacePath,
     ],

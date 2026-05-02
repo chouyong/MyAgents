@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useR
 
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
@@ -246,14 +247,18 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
             }
         }, [command, name, scope, agentDir, onDeleted, api, isInTabContext]);
 
+        // Phase D.5: command.path is an absolute path; route through the
+        // dedicated `cmd_open_path_external` invoke (validates home/tmp prefix)
+        // instead of sidecar `/agent/open-path`.
+        const fileService = useWorkspaceFileService(null);
         const handleOpenInFinder = useCallback(async () => {
             if (!command) return;
             try {
-                await api.post('/agent/open-path', { fullPath: command.path });
+                await fileService.openPathExternal({ fullPath: command.path });
             } catch {
                 toastRef.current.error('无法打开目录');
             }
-        }, [command, api]);
+        }, [command, fileService]);
 
         if (loading) {
             return (

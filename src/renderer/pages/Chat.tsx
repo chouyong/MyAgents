@@ -27,6 +27,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange } from '@/api/persistInputOption';
@@ -205,6 +206,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   } = useTabState();
   const isActive = useTabActive();
   const toast = useToast();
+
+  // Workspace file service — Phase D coherence fix: SimpleChatInput already
+  // sources its slash menu from `cmd_list_slash_commands`; the chat sidebar
+  // (loadSkillsAndCommands below) used to hit the sidecar `/api/commands`
+  // route, so the two surfaces could drift when sidecar fingerprint and Rust
+  // scan disagreed (different builtin tables, different filter rules). Routing
+  // both through one Rust source of truth removes the drift class.
+  const fileService = useWorkspaceFileService(agentDir);
 
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData, refreshConfig } = useConfig();
@@ -1330,10 +1339,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [apiGet, apiPost]);
 
-  // Load skills/commands for sidebar display
+  // Load skills/commands for sidebar display.
+  // Sources the same Rust scan that SimpleChatInput's slash menu uses so the
+  // sidebar list and the slash-menu list cannot disagree.
   const loadSkillsAndCommands = useCallback(async () => {
+    if (!fileService.isAvailable) return;
     try {
-      const response = await apiGet<{ success: boolean; commands: Array<{ name: string; description: string; source: string; scope?: 'user' | 'project'; folderName?: string; fileName?: string }>; globalSkillFolderNames?: string[] }>('/api/commands');
+      const response = await fileService.listSlashCommands();
       if (response.success && response.commands) {
         setEnabledSkills(response.commands.filter(c => c.source === 'skill').map(c => ({ name: c.name, description: c.description, scope: c.scope, folderName: c.folderName })));
         setEnabledCommands(response.commands.filter(c => c.source === 'custom').map(c => ({ name: c.name, description: c.description, scope: c.scope, fileName: c.fileName })));
@@ -1342,7 +1354,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     } catch (err) {
       console.error('[Chat] Failed to load skills/commands:', err);
     }
-  }, [apiGet]);
+  }, [fileService]);
 
   // Sync project skill to global
   const loadSkillsAndCommandsRef = useRef(loadSkillsAndCommands);
@@ -2838,6 +2850,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             callbacks) still clear the cache.
           */}
           <FileActionProvider
+            workspacePath={agentDir}
             onInsertReference={handleInsertReference}
             refreshTrigger={workspaceRefreshTrigger}
             onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}

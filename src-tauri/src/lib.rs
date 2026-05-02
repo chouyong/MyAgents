@@ -356,6 +356,7 @@ pub fn run() {
             // re-export at the parent module level.
             workspace_files::files_b64::cmd_workspace_import_files_b64,
             workspace_files::files_b64::cmd_workspace_read_files_b64,
+            workspace_files::check_paths::cmd_workspace_check_paths,
             workspace_files::transfer::cmd_workspace_copy_paths,
             workspace_files::gitignore::cmd_workspace_add_gitignore,
             workspace_files::search::cmd_workspace_search_files_fuzzy,
@@ -371,10 +372,10 @@ pub fn run() {
             workspace_files::crud::cmd_workspace_move,
             workspace_files::system_open::cmd_workspace_open_in_finder,
             workspace_files::system_open::cmd_workspace_open_with_default,
+            workspace_files::system_open::cmd_open_path_external,
             workspace_files::git_branch::cmd_workspace_git_branch,
             workspace_files::watcher::cmd_workspace_watch_start,
             workspace_files::watcher::cmd_workspace_watch_stop,
-            workspace_files::watcher::cmd_workspace_watch_event_key,
             // Full-text search commands
             search::cmd_search_sessions,
             search::cmd_search_workspace_files,

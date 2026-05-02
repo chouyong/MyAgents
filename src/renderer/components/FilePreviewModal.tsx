@@ -211,9 +211,15 @@ export default function FilePreviewModal({
     const tabApi = useTabApiOptional();
     const apiPost = tabApi?.apiPost;
 
-    // Edit: Tab API OR explicit onSave prop.  Reveal: Tab API OR explicit onRevealFile prop.
+    // Edit: Tab API OR explicit onSave prop.
     const canEdit = !!(apiPost || onSave);
-    const canReveal = !!(apiPost || onRevealFile);
+    // Reveal: only when caller provides `onRevealFile`. Phase D.5 red-line:
+    // workspace file ops must go through Rust workspace_files (the caller
+    // wraps `fileService.openInFinder`), not sidecar HTTP. Removing the
+    // sidecar `apiPost('/agent/open-in-finder')` fallback hides the button
+    // for callers that haven't been migrated rather than silently violating
+    // the red-line.
+    const canReveal = !!onRevealFile;
 
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
     const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
@@ -456,17 +462,13 @@ export default function FilePreviewModal({
     const monacoQuote = onQuoteSelection ? handleMonacoQuote : undefined;
 
     const handleOpenInFinder = useCallback(async () => {
-        if (!canReveal) return;
+        if (!canReveal || !onRevealFile) return;
         try {
-            if (onRevealFile) {
-                await onRevealFile();
-            } else if (apiPost) {
-                await apiPost('/agent/open-in-finder', { path });
-            }
+            await onRevealFile();
         } catch {
             toastRef.current.error('无法打开目录');
         }
-    }, [canReveal, onRevealFile, apiPost, path]);
+    }, [canReveal, onRevealFile]);
 
     // Markdown is in "edit" mode when user toggled the segment AND the file is editable.
     // Read-only markdown stays in preview regardless of toggle (the toggle is hidden anyway).

@@ -20,11 +20,10 @@ import {
 } from 'react';
 import type { ReactNode } from 'react';
 
-import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import ContextMenu from '@/components/ContextMenu';
 import type { ContextMenuItem } from '@/components/ContextMenu';
 import { useImagePreview } from '@/context/ImagePreviewContext';
-import { useTabApi } from '@/context/TabContext';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { isImageFile, isPreviewable } from '../../shared/fileTypes';
 
 // Lazy load FilePreviewModal (heavy: includes SyntaxHighlighter + Monaco)
@@ -48,6 +47,10 @@ export interface FileActionContextValue {
 
 interface FileActionProviderProps {
   children: ReactNode;
+  /** Workspace path for resolving relative paths (Phase D.5: was previously
+   *  inferred from sidecar's `currentAgentDir`; now passed explicitly so the
+   *  Provider doesn't depend on a sidecar). */
+  workspacePath: string | null;
   /** Callback to insert @-reference into the chat input. */
   onInsertReference?: (paths: string[]) => void;
   /** When this value changes, the path cache is cleared (e.g. toolCompleteCount). */
@@ -75,8 +78,8 @@ export function useFileAction(): FileActionContextValue | null {
 
 const BATCH_DELAY_MS = 50;
 
-export function FileActionProvider({ children, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection }: FileActionProviderProps) {
-  const { tabId, apiPost, apiGet } = useTabApi();
+export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection }: FileActionProviderProps) {
+  const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
 
   // Stabilise callbacks via refs
@@ -86,10 +89,11 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
   const onFilePreviewExternalRef = useRef(onFilePreviewExternal);
   onFilePreviewExternalRef.current = onFilePreviewExternal;
 
-  const apiPostRef = useRef(apiPost);
-  apiPostRef.current = apiPost;
-  const apiGetRef = useRef(apiGet);
-  apiGetRef.current = apiGet;
+  // Stabilise fileService so async closures see the latest service without
+  // re-binding callbacks. Mirrors the React-stability rules pattern used
+  // elsewhere (toastRef, apiPostRef in legacy code).
+  const fileServiceRef = useRef(fileService);
+  fileServiceRef.current = fileService;
 
   // Guard against setState after unmount
   const isMountedRef = useRef(true);
@@ -122,20 +126,19 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
     };
   }, []);
 
-  // Flush pending paths to the backend
+  // Flush pending paths to the backend (Rust workspace_files::check_paths
+  // since Phase D.5 — used to be sidecar `/agent/check-paths`).
   const flushPendingPaths = useCallback(() => {
     const paths = Array.from(pendingPathsRef.current);
     pendingPathsRef.current.clear();
     batchTimerRef.current = null;
 
     if (paths.length === 0) return;
+    if (!fileServiceRef.current.isAvailable) return;
 
     void (async () => {
       try {
-        const resp = await apiPostRef.current<{ results: Record<string, PathInfo> }>(
-          '/agent/check-paths',
-          { paths },
-        );
+        const resp = await fileServiceRef.current.checkPaths({ paths });
         if (!isMountedRef.current) return;
         if (resp?.results) {
           for (const [p, info] of Object.entries(resp.results)) {
@@ -188,35 +191,37 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
     error: string | null;
   } | null>(null);
 
-  const tabIdRef = useRef(tabId);
-  tabIdRef.current = tabId;
-
   const handlePreview = useCallback((path: string) => {
     const fileName = path.split('/').pop() ?? path;
+    const svc = fileServiceRef.current;
+    if (!svc.isAvailable) return;
 
     if (isImageFile(fileName)) {
-      // Fetch image through the Tauri proxy (same approach as DirectoryPanel)
-      const endpoint = `/agent/download?path=${encodeURIComponent(path)}`;
       void (async () => {
+        let handle: { blobUrl: string; revoke: () => void } | null = null;
         try {
-          let response: Response;
-          if (isTauri()) {
-            const baseUrl = await getTabServerUrl(tabIdRef.current);
-            response = await proxyFetch(`${baseUrl}${endpoint}`);
-          } else {
-            response = await fetch(endpoint);
+          handle = await svc.readFileAsBlobUrl({ path });
+          if (!isMountedRef.current) {
+            handle.revoke();
+            return;
           }
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const blob = await response.blob();
-          const dataUrl = await new Promise<string>((resolve) => {
+          // Convert blob URL → data URL for the image preview overlay.
+          // The preview component caches the data URL, so we can release
+          // the blob URL immediately afterwards.
+          const resp = await fetch(handle.blobUrl);
+          const blob = await resp.blob();
+          const dataUrl = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error('FileReader failed'));
             reader.readAsDataURL(blob);
           });
           if (!isMountedRef.current) return;
           openImagePreview(dataUrl, fileName);
         } catch (err) {
           console.error('[FileAction] Failed to load image:', err);
+        } finally {
+          if (handle) handle.revoke();
         }
       })();
       return;
@@ -228,10 +233,8 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
     if (onFilePreviewExternalRef.current) {
       void (async () => {
         try {
-          const resp = await apiGetRef.current<{ content: string; name: string; size: number; error?: string }>(
-            `/agent/file?path=${encodeURIComponent(path)}`,
-          );
-          if (!isMountedRef.current || resp.error) return;
+          const resp = await svc.readPreview({ path });
+          if (!isMountedRef.current) return;
           onFilePreviewExternalRef.current?.({ name: resp.name, content: resp.content, size: resp.size, path });
         } catch { /* split-view fetch errors handled by DirectoryPanel toast */ }
       })();
@@ -243,15 +246,9 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
 
     void (async () => {
       try {
-        const resp = await apiGetRef.current<{ content: string; name: string; size: number; error?: string }>(
-          `/agent/file?path=${encodeURIComponent(path)}`,
-        );
+        const resp = await svc.readPreview({ path });
         if (!isMountedRef.current) return;
-        if (resp.error) {
-          setPreviewFile(prev => prev ? { ...prev, isLoading: false, error: resp.error ?? 'Unknown error' } : null);
-        } else {
-          setPreviewFile(prev => prev ? { ...prev, content: resp.content, size: resp.size, name: resp.name, isLoading: false } : null);
-        }
+        setPreviewFile(prev => prev ? { ...prev, content: resp.content, size: resp.size, name: resp.name, isLoading: false } : null);
       } catch (err) {
         if (!isMountedRef.current) return;
         setPreviewFile(prev => prev ? { ...prev, isLoading: false, error: err instanceof Error ? err.message : 'Failed to load file' } : null);
@@ -264,11 +261,11 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
   }, []);
 
   const handleOpenWithDefault = useCallback((path: string) => {
-    void apiPostRef.current('/agent/open-with-default', { path });
+    void fileServiceRef.current.openWithDefault({ path }).catch(() => {});
   }, []);
 
   const handleOpenInFinder = useCallback((path: string) => {
-    void apiPostRef.current('/agent/open-in-finder', { path });
+    void fileServiceRef.current.openInFinder({ path }).catch(() => {});
   }, []);
 
   // Build menu items
@@ -341,6 +338,12 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
             isLoading={previewFile.isLoading}
             error={previewFile.error}
             onClose={() => setPreviewFile(null)}
+            // Phase D.5: route reveal-in-finder through fileService rather
+            // than letting the modal fall back to sidecar `/agent/open-in-finder`.
+            onRevealFile={async () => {
+              const p = previewFile.path;
+              await fileServiceRef.current.openInFinder({ path: p });
+            }}
             onQuoteFile={onQuoteFile}
             onQuoteSelection={onQuoteSelection}
           />

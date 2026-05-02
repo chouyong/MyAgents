@@ -1,11 +1,22 @@
 //! "Open in Finder/Explorer" + "Open with default app".
 //!
-//! Both fire-and-forget — the spawned command's stdout/stderr is dropped
-//! deliberately so we don't block the IPC reply. Rust `process_cmd::new` is
-//! used (not raw `std::process::Command`) so Windows builds suppress the
-//! console-window flash per the CLAUDE.md red-line.
+//! Three commands:
+//! - `cmd_workspace_open_in_finder` — workspace-relative path, reveals in OS
+//!   file manager (`open -R` / `explorer /select,` / `xdg-open <parent>`).
+//! - `cmd_workspace_open_with_default` — workspace-relative path, hands off
+//!   to the OS default-app dispatcher.
+//! - `cmd_open_path_external` (Phase D.5) — absolute path, used by the
+//!   Skill/Command detail panels to reveal `~/.myagents/skills/...` files
+//!   that live OUTSIDE any chat workspace. Validated against `home_dir` /
+//!   `tmp_dir` prefix (mirrors sidecar `/agent/open-path`) so a malicious
+//!   absolute path can't escape into `/etc` or similar.
+//!
+//! All variants fire-and-forget — the spawned command's stdout/stderr is
+//! dropped deliberately so we don't block the IPC reply. Rust
+//! `process_cmd::new` is used (not raw `std::process::Command`) so Windows
+//! builds suppress the console-window flash per the CLAUDE.md red-line.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -44,6 +55,68 @@ pub async fn cmd_workspace_open_with_default(
     }
     spawn_default_open(&target)?;
     Ok(SystemOpenResult { success: true })
+}
+
+/// Reveal an **absolute** path in the OS file manager. Used by the
+/// Skill/Command detail panels to open `~/.myagents/skills/<name>/SKILL.md`
+/// (which lives outside any chat workspace).
+///
+/// Security model: the path must canonicalize to somewhere under the user's
+/// home directory or the system tmp directory. This mirrors sidecar
+/// `/agent/open-path` and rejects paths under `/etc`, `/System`, etc. Symlink
+/// escape is closed by canonicalizing both ends (the path AND the home dir)
+/// before the prefix check.
+#[tauri::command]
+pub async fn cmd_open_path_external(full_path: String) -> Result<SystemOpenResult, String> {
+    let trimmed = full_path.trim();
+    if trimmed.is_empty() {
+        return Err("fullPath is required".to_string());
+    }
+    let target = validate_external_open_path(trimmed)?;
+    spawn_reveal(&target)?;
+    Ok(SystemOpenResult { success: true })
+}
+
+/// Validate that `full_path` (absolute) canonicalizes to somewhere safe to
+/// reveal in the OS file manager: under home_dir or tmp_dir, and the path
+/// must currently exist. Returns the canonical path on success.
+fn validate_external_open_path(full_path: &str) -> Result<PathBuf, String> {
+    let target = PathBuf::from(full_path);
+    if !target.is_absolute() {
+        return Err("Path must be absolute".to_string());
+    }
+    // Canonicalize the candidate first — fails clean if the path doesn't
+    // exist, which is the right surface for a reveal-in-finder call (the
+    // sidecar returned 404 in this case; we surface it as an error).
+    let canonical = std::fs::canonicalize(&target)
+        .map_err(|_| "File or folder not found".to_string())?;
+
+    let home = home_dir().ok_or_else(|| "Cannot resolve home directory".to_string())?;
+    let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
+
+    let tmp = std::env::temp_dir();
+    let canonical_tmp = std::fs::canonicalize(&tmp).unwrap_or(tmp);
+
+    // Prefix-check against canonicalized roots so a symlink chain can't
+    // escape into /etc via a tmp/home-shaped lure.
+    if !canonical.starts_with(&canonical_home) && !canonical.starts_with(&canonical_tmp) {
+        return Err("Path not allowed".to_string());
+    }
+    Ok(canonical)
+}
+
+/// Cross-platform home dir lookup. We avoid the `home` crate to keep
+/// dependencies tight; `HOME` (Unix) / `USERPROFILE` (Windows) are stable
+/// since the early '90s and the rest of the codebase already relies on them.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -141,4 +214,87 @@ mod tests {
 
     // We don't actually invoke the spawn — that'd open a Finder window from
     // the test runner. The validation paths above cover the safety surface.
+
+    // ── cmd_open_path_external — Phase D.5 ──
+
+    #[tokio::test]
+    async fn open_path_external_rejects_relative() {
+        let res = cmd_open_path_external("relative/path".to_string()).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("absolute"));
+    }
+
+    #[tokio::test]
+    async fn open_path_external_rejects_empty() {
+        let res = cmd_open_path_external("".to_string()).await;
+        assert!(res.is_err());
+        let res = cmd_open_path_external("   ".to_string()).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn open_path_external_rejects_missing() {
+        let nonexistent = std::env::temp_dir()
+            .join(format!("ws_open_external_missing_{}", std::process::id()));
+        // Don't create — should fail at canonicalize.
+        let res = cmd_open_path_external(nonexistent.to_string_lossy().to_string()).await;
+        assert!(res.is_err());
+    }
+
+    // Path under the user home dir — validation passes (we don't invoke
+    // spawn in tests; just check the validator).
+    #[test]
+    fn validate_external_open_accepts_home_path() {
+        // Use a real existing file under home: the test workspace itself
+        // (which we just created via make_test_workspace).
+        let ws = make_test_workspace("system_open_external_home");
+        fs::write(ws.join("inside.md"), "x").unwrap();
+        let res = validate_external_open_path(
+            ws.join("inside.md").to_string_lossy().as_ref(),
+        );
+        assert!(res.is_ok(), "home-dir path should validate, got {:?}", res);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn validate_external_open_accepts_tmp_path() {
+        let p = std::env::temp_dir()
+            .join(format!("ws_open_tmp_test_{}", std::process::id()));
+        fs::write(&p, "x").unwrap();
+        let res = validate_external_open_path(p.to_string_lossy().as_ref());
+        assert!(res.is_ok(), "tmp path should validate, got {:?}", res);
+        let _ = fs::remove_file(&p);
+    }
+
+    // Path under a forbidden system dir → rejected. /etc/hosts exists on
+    // every macOS/Linux and is outside both home and tmp.
+    #[cfg(not(windows))]
+    #[test]
+    fn validate_external_open_rejects_etc() {
+        let res = validate_external_open_path("/etc/hosts");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("not allowed"));
+    }
+
+    // Symlink ESCAPE from a tmp-shaped lure: a tmp file linking to /etc/hosts
+    // must be rejected because canonicalize resolves through the link before
+    // the prefix check.
+    #[cfg(unix)]
+    #[test]
+    fn validate_external_open_blocks_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let lure = std::env::temp_dir()
+            .join(format!("ws_open_lure_{}", std::process::id()));
+        // Symlink in tmp (allowed prefix) → /etc/hosts (forbidden target).
+        let target = "/etc/hosts";
+        if !std::path::Path::new(target).exists() {
+            // Skip on systems without /etc/hosts (Windows, sandboxed CI).
+            return;
+        }
+        let _ = std::fs::remove_file(&lure);
+        symlink(target, &lure).unwrap();
+        let res = validate_external_open_path(lure.to_string_lossy().as_ref());
+        assert!(res.is_err(), "symlink to /etc must be rejected, got {:?}", res);
+        let _ = std::fs::remove_file(&lure);
+    }
 }

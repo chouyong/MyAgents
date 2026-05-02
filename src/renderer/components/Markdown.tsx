@@ -26,8 +26,7 @@ import InlineCode from './markdown/InlineCode';
 import MermaidDiagram from './markdown/MermaidDiagram';
 import { openExternal, isExternalUrl } from '@/utils/openExternal';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
-import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
-import { useTabApiOptional } from '@/context/TabContext';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { preprocessMarkdownContent } from '@/utils/markdownPreprocess';
 
 // Sanitize schema: allow safe HTML tags from rehype-raw, strip scripts/iframes/event handlers.
@@ -319,22 +318,28 @@ function safeDecodeURIComponent(str: string): string {
 }
 
 /**
- * Image component that resolves relative paths via the sidecar download API.
- * Only used when basePath is provided (file preview mode).
+ * Image component that resolves relative paths via the Rust workspace_files
+ * download command. Only used when basePath is provided (file preview mode).
+ *
+ * Phase D.5: switched from sidecar `/agent/download` HTTP fetch to
+ * `useWorkspaceFileService.readFileAsBlobUrl` invoke. The blob-URL handle
+ * is the source of truth for cleanup — calling `handle.revoke()` on unmount
+ * frees the object URL.
  *
  * State model:
  * - empty / absolute src → handled purely in render, no state or effect needed
- * - relative src → useEffect fetches via API, stores blob URL in state
+ * - relative src → useEffect fetches via fileService, stores blob URL handle
  */
-function MarkdownImage({ src, alt, basePath, tabId }: {
+function MarkdownImage({ src, alt, basePath }: {
   src?: string;
   alt?: string;
   basePath: string;
-  tabId: string;
 }) {
   // Classify src type on every render (derived, not state)
   const srcType: 'empty' | 'absolute' | 'relative' =
     !src ? 'empty' : isAbsoluteUrl(src) ? 'absolute' : 'relative';
+
+  const fileService = useWorkspaceFileService(basePath || null);
 
   // State only needed for async-loaded relative paths
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -343,31 +348,22 @@ function MarkdownImage({ src, alt, basePath, tabId }: {
   useEffect(() => {
     // Only relative paths need async loading
     if (srcType !== 'relative') return;
+    if (!fileService.isAvailable) return;
 
     // Decode first to prevent double-encoding (e.g. "some%20image.png")
     const decoded = safeDecodeURIComponent(src!);
     const resolvedPath = resolveRelativePath(basePath, decoded);
-    const endpoint = `/agent/download?path=${encodeURIComponent(resolvedPath)}`;
     let cancelled = false;
+    let handle: { blobUrl: string; revoke: () => void } | null = null;
 
     (async () => {
       try {
-        let response: Response;
-        if (isTauri()) {
-          const baseUrl = await getTabServerUrl(tabId);
-          response = await proxyFetch(`${baseUrl}${endpoint}`);
-        } else {
-          response = await fetch(endpoint);
-        }
-
-        if (!response.ok) {
-          if (!cancelled) setError(`图片未找到: ${src}`);
+        handle = await fileService.readFileAsBlobUrl({ path: resolvedPath });
+        if (cancelled) {
+          handle.revoke();
           return;
         }
-
-        const blob = await response.blob();
-        if (cancelled) return;
-        setBlobUrl(URL.createObjectURL(blob));
+        setBlobUrl(handle.blobUrl);
       } catch {
         if (!cancelled) setError(`图片加载失败: ${src}`);
       }
@@ -375,14 +371,13 @@ function MarkdownImage({ src, alt, basePath, tabId }: {
 
     return () => {
       cancelled = true;
-      // Revoke blob URL on cleanup to prevent memory leaks
-      setBlobUrl(prev => {
-        if (prev) URL.revokeObjectURL(prev);
-        return null;
-      });
+      // The handle owns the blob URL — revoke through it so we don't leak if
+      // we created it before the cancel flag flipped.
+      if (handle) handle.revoke();
+      setBlobUrl(null);
       setError(null);
     };
-  }, [src, srcType, basePath, tabId]);
+  }, [src, srcType, basePath, fileService]);
 
   // Empty src: static error (no state needed)
   if (srcType === 'empty') {
@@ -424,9 +419,9 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
   // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering
   const processedContent = raw ? convertFrontmatter(children) : preprocessMarkdownContent(children);
 
-  // Get tabId for image loading (only needed when basePath is provided)
-  const tabApi = useTabApiOptional();
-  const tabId = tabApi?.tabId ?? '';
+  // Phase D.5: image loading goes through Rust workspace_files (the
+  // MarkdownImage component instantiates its own `useWorkspaceFileService`),
+  // so the legacy tabId / sidecar `proxyFetch` plumbing is gone.
 
   // Merge img handler when basePath is provided (for resolving relative image paths)
   // Use == null to allow empty string basePath (root-level files)
@@ -435,10 +430,10 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
     return {
       ...markdownComponents,
       img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
-        <MarkdownImage src={props.src} alt={props.alt} basePath={basePath} tabId={tabId} />
+        <MarkdownImage src={props.src} alt={props.alt} basePath={basePath} />
       ),
     };
-  }, [basePath, tabId]);
+  }, [basePath]);
 
   return (
     <div className={`break-words ${compact ? 'text-sm' : 'text-base'}`}>
