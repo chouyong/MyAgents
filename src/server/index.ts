@@ -245,7 +245,7 @@ import {
   getPendingInteractiveRequests,
   stripPlaywrightResults,
   setSidecarPort,
-  getOpenAiBridgeConfig,
+  hasActiveBridge,
   getSessionModel,
   syncProjectUserConfig,
   setProxyConfig,
@@ -1195,51 +1195,84 @@ async function main() {
   (globalThis as { __myagentsDeferredInit?: Promise<void> }).__myagentsDeferredInit =
     deferredInitPromise;
 
-  // ── OpenAI bridge: lazy ─────────────────────────────────────────────────
-  // Only users on OpenAI-protocol providers hit /v1/messages. Importing
-  // ./openai-bridge (~2600 lines, includes translate/utils/types subtrees)
-  // at startup costs ~120ms for zero benefit on Anthropic-native setups.
+  /**
+   * Extract the bridge token from a `/bridge/<token>/v1/messages` URL.
+   * Returns the token string or `null` for any URL that doesn't match
+   * the expected shape. PRD #124.
+   */
+  function extractBridgeTokenFromUrl(rawUrl: string): string | null {
+    try {
+      const u = new URL(rawUrl);
+      const m = u.pathname.match(/^\/bridge\/([^/]+)\/v1\/messages(?:\/count_tokens)?$/);
+      return m ? m[1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── OpenAI bridge: lazy + per-token (PRD #124) ─────────────────────────
+  // Only users on OpenAI-protocol providers hit `/bridge/<token>/v1/messages`.
+  // Importing `./openai-bridge` (~2600 lines, includes translate/utils/types
+  // subtrees) at startup costs ~120ms for zero benefit on Anthropic-native
+  // setups, so the factory stays lazy.
   //
-  // Strategy: keep the factory behind ensureBridgeHandler(). First /v1/messages
-  // that sees an active bridgeConfig loads the module, builds the handler,
-  // and wires registerBridgeSeedFn (bridge-cache buffers signatures until
-  // registration, so seed ordering is preserved — see bridge-cache.ts).
+  // The handler is stateless across tokens: every request carries its
+  // bridge token in the URL path; getUpstreamConfig parses the token and
+  // looks it up in `bridge-registry`. Each SDK subprocess (active session,
+  // verify, title-gen, sub-agent) registers under its own token, so they
+  // route to their own upstream without cross-pollination. See
+  // `bridge-registry.ts` for the lifecycle contract.
   let bridgeHandlerPromise: Promise<BridgeHandler> | null = null;
   const ensureBridgeHandler = (): Promise<BridgeHandler> => {
-    if (!bridgeHandlerPromise) {
-      bridgeHandlerPromise = import('./openai-bridge').then(({ createBridgeHandler }) => {
-        const handler = createBridgeHandler({
+    if (bridgeHandlerPromise) return bridgeHandlerPromise;
+    bridgeHandlerPromise = (async () => {
+      const [{ createBridgeHandler }, { lookupBridge }] = await Promise.all([
+        import('./openai-bridge'),
+        import('./openai-bridge/bridge-registry'),
+      ]);
+      const handler = createBridgeHandler({
           workspacePath: agentDir || undefined,
-          getUpstreamConfig: () => {
-            const config = getOpenAiBridgeConfig();
-            if (!config) throw new Error('Bridge not active');
+          getUpstreamConfig: (request) => {
+            const token = extractBridgeTokenFromUrl(request.url);
+            if (!token) {
+              throw new Error('Bridge request missing token in URL path');
+            }
+            const cfg = lookupBridge(token);
+            if (!cfg) {
+              throw new Error(`Unknown bridge token: ${token}`);
+            }
+            // Per-request modelMapping bound to THIS token's aliases —
+            // ensures concurrent bridges with different sub-agent rules
+            // don't cross-pollinate (the original #124 bug class).
+            const aliases = cfg.modelAliases;
+            const modelMapping = aliases
+              ? (requestModel: string): string | undefined => {
+                  if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
+                  if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
+                  if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
+                  // Last-resort: claude-* with no specific alias → use the
+                  // bridge's own active model (per-token, no global leakage).
+                  if (requestModel.startsWith('claude-')) return cfg.model || undefined;
+                  return undefined;
+                }
+              : undefined;
             return {
-              baseUrl: config.baseUrl,
-              apiKey: config.apiKey,
-              model: config.model,
-              maxOutputTokens: config.maxOutputTokens,
-              maxOutputTokensParamName: config.maxOutputTokensParamName,
-              upstreamFormat: config.upstreamFormat,
+              baseUrl: cfg.baseUrl,
+              apiKey: cfg.apiKey,
+              model: cfg.model,
+              maxOutputTokens: cfg.maxOutputTokens,
+              maxOutputTokensParamName: cfg.maxOutputTokensParamName,
+              upstreamFormat: cfg.upstreamFormat,
+              modelMapping,
             };
-          },
-          modelMapping: (requestModel: string) => {
-            const config = getOpenAiBridgeConfig();
-            if (!config?.modelAliases) return undefined;
-            const aliases = config.modelAliases;
-            if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
-            if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
-            if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
-            if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
-            return undefined;
           },
           logger: (msg) => console.log(msg),
         });
-        // Register seed callback now that the handler exists. bridge-cache
-        // flushes any entries buffered during pre-registration.
-        registerBridgeSeedFn((entries) => handler.seedThoughtSignatures(entries));
-        return handler;
-      });
-    }
+      // Register seed callback now that the handler exists. bridge-cache
+      // flushes any entries buffered during pre-registration.
+      registerBridgeSeedFn((entries) => handler.seedThoughtSignatures(entries));
+      return handler;
+    })();
     return bridgeHandlerPromise;
   };
 
@@ -7937,47 +7970,63 @@ description: >
 
       // ============= END IM BOT API =============
 
-      // ============= OPENAI BRIDGE (Loopback) =============
-      // SDK subprocess sends Anthropic requests here when provider uses OpenAI protocol
-      if (pathname === '/v1/messages' && request.method === 'POST') {
-        const bridgeConfig = getOpenAiBridgeConfig();
-        if (bridgeConfig) {
-          // Diagnostic: log incoming model name to verify sub-agent requests reach the bridge
-          try {
-            const clonedReq = request.clone();
-            const body = await clonedReq.json() as { model?: string };
-            console.log(`[bridge] Incoming request: model=${body.model ?? '(none)'}, bridge_model_override=${bridgeConfig.model ?? '(none)'}`);
-          } catch { /* ignore parse errors for diagnostic */ }
-          try {
-            const handler = await ensureBridgeHandler();
-            return await handler(request);
-          } catch (error) {
-            console.error('[bridge] Handler error:', error);
+      // ============= OPENAI BRIDGE (Loopback, per-token) =============
+      // PRD #124: each SDK subprocess registers under a unique token.
+      // ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/bridge/<token>, so the
+      // CLI sends POSTs to /bridge/<token>/v1/messages. The handler resolves
+      // the token via `bridge-registry` and routes to that subprocess's own
+      // upstream — no shared global state, no cross-pollination between
+      // concurrent SDK invocations.
+      const bridgeMessagesMatch = pathname.match(/^\/bridge\/([^/]+)\/v1\/messages$/);
+      if (bridgeMessagesMatch && request.method === 'POST') {
+        const token = bridgeMessagesMatch[1];
+        try {
+          const handler = await ensureBridgeHandler();
+          return await handler(request);
+        } catch (error) {
+          // The handler's getUpstreamConfig throws when the token is unknown
+          // (subprocess unregistered, or routing was wrong) — surface as 400
+          // so the SDK sees a clean error instead of a 500.
+          const msg = error instanceof Error ? error.message : 'Bridge error';
+          const isUnknownToken = msg.startsWith('Unknown bridge token');
+          if (isUnknownToken) {
+            console.warn(`[bridge] rejecting request with unknown token=${token}: ${msg}`);
             return jsonResponse(
-              { type: 'error', error: { type: 'api_error', message: error instanceof Error ? error.message : 'Bridge error' } },
-              500,
+              { type: 'error', error: { type: 'invalid_request_error', message: msg } },
+              400,
             );
           }
+          console.error('[bridge] Handler error:', error);
+          return jsonResponse(
+            { type: 'error', error: { type: 'api_error', message: msg } },
+            500,
+          );
         }
-        // Bridge not active — fall through to 404
       }
 
-      // POST /v1/messages/count_tokens — CLI sends this for context window management.
-      // OpenAI-compatible APIs have no equivalent, so return an estimated token count.
-      if (pathname === '/v1/messages/count_tokens' && request.method === 'POST') {
-        const bridgeConfig = getOpenAiBridgeConfig();
-        if (bridgeConfig) {
-          try {
-            const body = await request.json() as { messages?: unknown[]; system?: unknown; tools?: unknown[] };
-            // Rough estimate: serialize content → chars / 4 ≈ tokens
-            const contentLength = JSON.stringify(body.messages ?? []).length
-              + JSON.stringify(body.system ?? '').length
-              + JSON.stringify(body.tools ?? []).length;
-            const estimatedTokens = Math.max(1, Math.ceil(contentLength / 4));
-            return jsonResponse({ input_tokens: estimatedTokens });
-          } catch {
-            return jsonResponse({ input_tokens: 1024 }); // Safe fallback
-          }
+      // POST /bridge/<token>/v1/messages/count_tokens — CLI sends this for
+      // context window management. OpenAI-compatible APIs have no equivalent,
+      // so we return an estimated token count without involving the upstream.
+      // We still require a valid token so untokened callers can't probe.
+      const bridgeCountMatch = pathname.match(/^\/bridge\/([^/]+)\/v1\/messages\/count_tokens$/);
+      if (bridgeCountMatch && request.method === 'POST') {
+        const { lookupBridge } = await import('./openai-bridge/bridge-registry');
+        const token = bridgeCountMatch[1];
+        if (!lookupBridge(token)) {
+          return jsonResponse(
+            { type: 'error', error: { type: 'invalid_request_error', message: `Unknown bridge token: ${token}` } },
+            400,
+          );
+        }
+        try {
+          const body = await request.json() as { messages?: unknown[]; system?: unknown; tools?: unknown[] };
+          const contentLength = JSON.stringify(body.messages ?? []).length
+            + JSON.stringify(body.system ?? '').length
+            + JSON.stringify(body.tools ?? []).length;
+          const estimatedTokens = Math.max(1, Math.ceil(contentLength / 4));
+          return jsonResponse({ input_tokens: estimatedTokens });
+        } catch {
+          return jsonResponse({ input_tokens: 1024 }); // Safe fallback
         }
       }
 
@@ -8070,7 +8119,7 @@ description: >
         const model = getSessionModel() || '?';
         const mcpList = getMcpServers();
         const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
-        const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
+        const bridge = hasActiveBridge() ? 'yes' : 'no';
         // Health signal: confirm builtin-mcp-meta.ts's side-effect registration
         // actually fired. An empty list here is a red flag — the META file was
         // not imported by agent-session.ts, which means lazy MCP lookup will

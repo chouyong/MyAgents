@@ -40,4 +40,12 @@ export interface UpstreamConfig {
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   /** Upstream API format: 'chat_completions' (default) or 'responses' (OpenAI Responses API) */
   upstreamFormat?: 'chat_completions' | 'responses';
+  /**
+   * PRD #124: per-request model alias map. When the bridge is keyed by
+   * per-subprocess tokens, the alias map varies per-token — different
+   * SDK subprocesses may have different sub-agent routing rules. Setting
+   * this on UpstreamConfig overrides the BridgeConfig-level mapping for
+   * this single request. Same shape as `BridgeConfig.modelMapping`.
+   */
+  modelMapping?: Record<string, string> | ((model: string) => string | undefined);
 }

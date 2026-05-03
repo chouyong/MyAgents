@@ -148,9 +148,15 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     const isResponses = upstream.upstreamFormat === 'responses';
 
     // 4. Translate request (choose format based on upstream config)
+    // PRD #124: per-request model mapping (carried on UpstreamConfig, set by
+    // the route closure from the bridge token's registry entry) takes
+    // priority over the handler-wide BridgeConfig.modelMapping. This is what
+    // lets concurrent SDK subprocesses with different sub-agent rules
+    // coexist without cross-pollination.
+    const effectiveModelMapping = upstream.modelMapping ?? config.modelMapping;
     const translatedReq = isResponses
-      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: config.modelMapping, imageSaver })
-      : translateRequest(anthropicReq, { modelMapping: config.modelMapping, modelOverride: upstream.model, imageSaver });
+      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: effectiveModelMapping, imageSaver })
+      : translateRequest(anthropicReq, { modelMapping: effectiveModelMapping, modelOverride: upstream.model, imageSaver });
 
     // 4a. Normalize thought_signatures on tool_calls (Gemini thinking models).
     // Gemini requires thought_signature on tool_calls in conversation history.

@@ -9,7 +9,7 @@ import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolveClaudeCodeCli, buildClaudeSessionEnv, withScopedBridgeConfig } from './agent-session';
+import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge } from './agent-session';
 import { ensureDirSync } from './utils/fs-utils';
 import { getLastBridgeError } from './openai-bridge';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
@@ -297,27 +297,33 @@ export async function verifyProviderViaSdk(
   upstreamFormat?: 'chat_completions' | 'responses',
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}, maxOutputTokens=${maxOutputTokens ?? 'none'}`);
-  // Issue #124: `buildClaudeSessionEnv(<openai provider>)` mutates the global
-  // `currentOpenAiBridgeConfig` so the bridge handler can route the verify
-  // subprocess's loopback `/v1/messages` to the right upstream. But that same
-  // mutation hijacks the active Chat session's bridge — Chat's later
-  // `/v1/messages` end up at the verify provider with Chat's model name and
-  // come back as 404 + `<synthetic>` `chat:agent-error`. Scope the mutation
-  // to the verify lifecycle so the active session sees its own bridge again
-  // as soon as we return.
-  return withScopedBridgeConfig(async () => {
+  // PRD #124: register a per-call bridge token so the verify subprocess
+  // routes to ITS upstream via /bridge/<token>/v1/messages, completely
+  // isolated from the active Chat session's bridge (if any). The token
+  // resolver returns a static snapshot — verify's config doesn't change
+  // mid-call. Released in finally so the registry stays clean even on
+  // throw / timeout.
+  const providerEnv: import('./agent-session').ProviderEnv = {
+    baseUrl,
+    apiKey,
+    authType: authType as 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key',
+    apiProtocol,
+    maxOutputTokens,
+    maxOutputTokensParamName,
+    upstreamFormat,
+  };
+  // Only OpenAI-protocol providers route through the bridge. Anthropic-protocol
+  // providers (and subscription) hit their baseUrl directly — no token needed.
+  const bridge = apiProtocol === 'openai'
+    ? startOneShotBridge(providerEnv, model, `provider-verify:${baseUrl}`)
+    : null;
+  try {
     // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
     // computed for the model being verified, not the Tab's active session model.
-    const env = buildClaudeSessionEnv({
-      baseUrl,
-      apiKey,
-      authType: authType as 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key',
-      apiProtocol,
-      maxOutputTokens,
-      maxOutputTokensParamName,
-      upstreamFormat,
-    }, model);
-    return verifyViaSdk(env, {
+    const env = buildClaudeSessionEnv(providerEnv, model, {
+      bridgeToken: bridge?.token,
+    });
+    return await verifyViaSdk(env, {
       model,
       sessionId: randomUUID(),
       logPrefix: 'provider/verify',
@@ -333,7 +339,9 @@ export async function verifyProviderViaSdk(
       // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
       upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
     });
-  });
+  } finally {
+    bridge?.release();
+  }
 }
 
 /**
@@ -342,48 +350,46 @@ export async function verifyProviderViaSdk(
  * Uses the same SDK spawning pattern as verify, but only reads initialization data.
  */
 export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
-  // Issue #124: scope any bridge-config side effect from `buildClaudeSessionEnv`
-  // to this one-shot call so the active Chat session's bridge state is
-  // restored on exit. See `verifyProviderViaSdk` for the full rationale.
-  return withScopedBridgeConfig(async () => {
-    const cliPath = resolveClaudeCodeCli();
-    const cwd = join(homedir(), '.myagents', 'projects');
-    ensureDirSync(cwd);
+  // PRD #124: this path uses default Anthropic env (subscription / Anthropic-
+  // protocol providers go straight to api.anthropic.com), so no bridge token
+  // is needed. `buildClaudeSessionEnv()` is now a pure function — no global
+  // state pollution to clean up.
+  const cliPath = resolveClaudeCodeCli();
+  const cwd = join(homedir(), '.myagents', 'projects');
+  ensureDirSync(cwd);
 
-    // Use default Anthropic env (includes proxy config, NO_PROXY etc.)
-    const env = buildClaudeSessionEnv();
+  const env = buildClaudeSessionEnv();
 
-    const testQuery = query({
-      prompt: '1+1=',
-      options: {
-        maxTurns: 0,
-        sessionId: randomUUID(),
-        cwd,
-        // 'user' reads ~/.claude/ OAuth credentials (same as verifySubscription)
-        settingSources: ['user'],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        pathToClaudeCodeExecutable: cliPath,
-        env,
-        persistSession: false,
-        mcpServers: {},
-        systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const },
-      },
-    });
-
-    const INIT_TIMEOUT_MS = 30000;
-    try {
-      const initResult = await Promise.race([
-        testQuery.initializationResult(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('SDK initialization timeout')), INIT_TIMEOUT_MS),
-        ),
-      ]);
-      return initResult.models ?? [];
-    } finally {
-      try { testQuery.return(undefined as never); } catch { /* cleanup */ }
-    }
+  const testQuery = query({
+    prompt: '1+1=',
+    options: {
+      maxTurns: 0,
+      sessionId: randomUUID(),
+      cwd,
+      // 'user' reads ~/.claude/ OAuth credentials (same as verifySubscription)
+      settingSources: ['user'],
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      pathToClaudeCodeExecutable: cliPath,
+      env,
+      persistSession: false,
+      mcpServers: {},
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const },
+    },
   });
+
+  const INIT_TIMEOUT_MS = 30000;
+  try {
+    const initResult = await Promise.race([
+      testQuery.initializationResult(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('SDK initialization timeout')), INIT_TIMEOUT_MS),
+      ),
+    ]);
+    return initResult.models ?? [];
+  } finally {
+    try { testQuery.return(undefined as never); } catch { /* cleanup */ }
+  }
 }
 
 /**
@@ -427,20 +433,16 @@ export function checkAnthropicSubscription(): SubscriptionStatus {
  */
 export async function verifySubscription(): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log('[subscription/verify] Starting SDK verification...');
-  // Issue #124: same scoping rationale as verifyProviderViaSdk. Even though
-  // subscription mode passes no providerEnv, `buildClaudeSessionEnv()` still
-  // touches `currentOpenAiBridgeConfig` based on the (possibly null)
-  // `currentProviderEnv` and we don't want a one-shot to leak that decision
-  // back to the active session.
-  return withScopedBridgeConfig(async () => {
-    const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
-    return verifyViaSdk(env, {
-      sessionId: randomUUID(),
-      logPrefix: 'subscription/verify',
-      parseError: parseSubscriptionError,
-      // Subscription needs 'user' to read ~/.claude/ OAuth credentials
-      settingSources: ['user'],
-    });
+  // PRD #124: subscription path doesn't need a bridge — SDK talks to
+  // api.anthropic.com directly. `buildClaudeSessionEnv()` is now pure
+  // and won't pollute any state.
+  const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
+  return verifyViaSdk(env, {
+    sessionId: randomUUID(),
+    logPrefix: 'subscription/verify',
+    parseError: parseSubscriptionError,
+    // Subscription needs 'user' to read ~/.claude/ OAuth credentials
+    settingSources: ['user'],
   });
 }
 
