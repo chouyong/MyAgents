@@ -11,9 +11,10 @@
  *   - The flusher uses a single `openSync` + batched `writeSync` +
  *     `closeSync` per drain — far cheaper than per-entry sync write.
  *   - Per-file 50MB cap → rotate to `unified-<date>.<iso>.log`.
- *   - Per-directory 500MB cap → evict oldest files (still respects
- *     `LOG_RETENTION_DAYS=30` from logUtils.ts — they coexist, with bytes
- *     winning when both apply).
+ *   - Directory budget + age retention live in `./log-retention.ts`
+ *     (#121, 2026-05) so unified + per-session logs share one coherent
+ *     policy. This module owns the active-write path (queue, flush,
+ *     rotation) only.
  *   - Process exit / SIGINT / SIGTERM hook drains the queue using the
  *     same batched openSync/writeSync path, so we don't lose entries at
  *     shutdown without resorting to a per-entry sync write.
@@ -28,17 +29,16 @@ import {
   closeSync,
   existsSync,
   openSync,
-  readdirSync,
   renameSync,
   statSync,
-  unlinkSync,
   writeSync,
 } from 'fs';
 import { join } from 'path';
 
 import type { LogEntry } from '../renderer/types/log';
-import { LOGS_DIR, LOG_RETENTION_DAYS, ensureLogsDir } from './logUtils';
+import { LOGS_DIR, ensureLogsDir } from './logUtils';
 import { localDate } from '../shared/logTime';
+import { runLogRetentionSweep } from './log-retention';
 
 // ── Tunables (Pattern 6 §6.3.5) ────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 100;
@@ -46,38 +46,13 @@ const FLUSH_INTERVAL_MS = 100;
 const QUEUE_MAX_ENTRIES = 1000;
 /** Per-file size cap before rotation. */
 const PER_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB
-/**
- * Per-directory size cap before oldest-eviction.
- *
- * Issue #121 (2026-05): the old 500MB cap silently evicted recent unified logs
- * even though they were well within the 30-day retention window. With heavy
- * daily logging (verbose 0.2.x SDK init + IM bots + cron) it's not unusual for
- * a few days to push past 500MB; eviction then chewed through the most recent
- * days first because they happened to be the only files on disk. Result: users
- * lost the diagnostics they actually needed (last few days of activity) while
- * older files would have been the safer thing to discard.
- *
- * Bumped to 5GB so the byte cap is a true safety valve against runaway disk
- * use, not an everyday eviction trigger. Together with the MIN_RETAIN_DAYS
- * floor below, recent logs are preserved unless disk usage is extreme.
- */
-const DIR_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5GB
-/**
- * Files modified within this window are NEVER evicted by the byte budget,
- * even if total directory size exceeds DIR_MAX_BYTES. The age-based retention
- * pass (`cleanupOldUnifiedLogs`, 30 days) still applies on top, so files
- * outside this floor but inside retention are eligible for size eviction.
- *
- * Pit-of-success: whatever a user is debugging right now, they will not
- * lose their recent log. If the floor + age retention together can't fit
- * under DIR_MAX_BYTES, we emit a stderr warning rather than evict recent
- * data — the warning makes the budget violation auditable.
- */
-const MIN_RETAIN_DAYS = 7;
 /** Drop-warning emit interval (only emits if dropped > 0 since last warn). */
 const DROP_WARN_INTERVAL_MS = 60_000;
 /** In-memory ring buffer for crash-log tail capture. */
 const RECENT_LINES_CAPACITY = 200;
+// Directory budget + retention floor live in `./log-retention.ts`. This
+// module focuses on the active-write path (queue, flush, rotation); it
+// hands off cleanup decisions to the unified retention sweep.
 
 // ── State ───────────────────────────────────────────────────────────────
 let currentDate: string | null = null;
@@ -159,70 +134,13 @@ function rotateIfNeeded(addBytes: number): void {
   currentFileSize = 0;
 }
 
-function enforceDirectoryBudget(): void {
-  try {
-    const files = readdirSync(LOGS_DIR)
-      .filter((f) => f.startsWith('unified-') && f.endsWith('.log'))
-      .map((f) => {
-        const p = join(LOGS_DIR, f);
-        try {
-          const s = statSync(p);
-          return { path: p, mtimeMs: s.mtimeMs, size: s.size };
-        } catch {
-          return null;
-        }
-      })
-      .filter((x): x is { path: string; mtimeMs: number; size: number } => x !== null);
-
-    let total = files.reduce((acc, f) => acc + f.size, 0);
-    if (total <= DIR_MAX_BYTES) return;
-
-    // Issue #121: never evict files modified within MIN_RETAIN_DAYS — recent
-    // logs are what users need for active debugging, and the byte budget is
-    // a safety valve, not an everyday tool.
-    const floorCutoff = Date.now() - MIN_RETAIN_DAYS * 24 * 60 * 60 * 1000;
-    files.sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
-
-    const evicted: string[] = [];
-    for (const f of files) {
-      if (total <= DIR_MAX_BYTES) break;
-      // Don't evict the actively-writing file even if it's oldest by mtime
-      // (race: we just rotated and renamed it — defensive).
-      if (f.path === currentFilePath) continue;
-      // Floor: skip files inside the protected recent window.
-      if (f.mtimeMs >= floorCutoff) continue;
-      try {
-        unlinkSync(f.path);
-        total -= f.size;
-        evicted.push(f.path);
-      } catch {
-        // Ignore individual eviction errors.
-      }
-    }
-
-    // Make eviction auditable — without this, users see "all my April logs
-    // are gone" with no record of when or why (#121's exact symptom). Use
-    // stderr directly: writing back through appendUnifiedLog could recurse
-    // into another budget check at a bad time.
-    if (evicted.length > 0) {
-      try {
-        process.stderr.write(
-          `[UnifiedLogger] evicted ${evicted.length} old log file(s) to enforce ${DIR_MAX_BYTES / (1024 * 1024 * 1024)}GB budget: ${evicted.map(p => p.split('/').pop()).join(', ')}\n`,
-        );
-      } catch { /* ignore */ }
-    } else if (total > DIR_MAX_BYTES) {
-      // All remaining files are within the protected window — we cannot
-      // bring usage under budget without violating the floor. Warn instead
-      // of silently failing.
-      try {
-        process.stderr.write(
-          `[UnifiedLogger] WARNING: log directory ${(total / (1024 * 1024 * 1024)).toFixed(2)}GB exceeds ${DIR_MAX_BYTES / (1024 * 1024 * 1024)}GB budget but all files are within ${MIN_RETAIN_DAYS}-day retention floor; not evicting\n`,
-        );
-      } catch { /* ignore */ }
-    }
-  } catch {
-    // Ignore directory walk errors — best-effort budget enforcement.
-  }
+/**
+ * Returns the path of the file we're currently writing to (today's
+ * unified-{date}.log). Used by `log-retention` so the budget sweep never
+ * evicts the file we're holding open. Null until the first flush.
+ */
+export function getActiveUnifiedLogPath(): string | null {
+  return currentFilePath;
 }
 
 // ── Flusher ────────────────────────────────────────────────────────────
@@ -258,9 +176,14 @@ function flushNow(): void {
     dropped += lines.length;
     lines = [];
   }
-  // Lazy directory-budget enforcement (only when we just wrote a lot).
+  // Eager directory-budget enforcement when we just hit the per-file rotation
+  // threshold — this is a strong signal that disk pressure is meaningful right
+  // now and the periodic 1-hour sweep would be late. Synchronous because
+  // sweeps are stat-only and fast (single-digit ms on a typical logs dir).
   if (payload.length > 0 && currentFileSize >= PER_FILE_MAX_BYTES) {
-    enforceDirectoryBudget();
+    runLogRetentionSweep({
+      activeFilePaths: currentFilePath ? new Set([currentFilePath]) : undefined,
+    });
   }
 }
 
@@ -313,42 +236,7 @@ function installExitHooks(): void {
   process.once('SIGTERM', () => { drain(); });
 }
 
-// ── Public API (unchanged signatures) ──────────────────────────────────
-
-/**
- * Clean up old unified log files (older than LOG_RETENTION_DAYS).
- * Coexists with byte-budget eviction in the flusher path.
- */
-export function cleanupOldUnifiedLogs(): void {
-  ensureLogsDir();
-
-  const now = Date.now();
-  const maxAge = LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  let deletedCount = 0;
-
-  try {
-    const files = readdirSync(LOGS_DIR);
-    for (const file of files) {
-      if (!file.startsWith('unified-') || !file.endsWith('.log')) continue;
-      const filePath = join(LOGS_DIR, file);
-      try {
-        const stat = statSync(filePath);
-        const age = now - stat.mtimeMs;
-        if (age > maxAge) {
-          unlinkSync(filePath);
-          deletedCount++;
-        }
-      } catch { /* ignore */ }
-    }
-    if (deletedCount > 0) {
-      console.log(`[UnifiedLogger] Cleaned up ${deletedCount} old unified log files`);
-    }
-  } catch (err) {
-    console.error('[UnifiedLogger] Failed to cleanup old logs:', err);
-  }
-  // Also enforce byte budget at startup so a stale 600MB dir gets trimmed.
-  enforceDirectoryBudget();
-}
+// ── Public API ────────────────────────────────────────────────────────
 
 /**
  * Append a log entry — non-blocking. Enqueues to an in-memory buffer

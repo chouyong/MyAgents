@@ -5,14 +5,16 @@
  * - Lazy file creation: only creates log file on first write
  * - Centralized log directory: ~/.myagents/logs/
  * - Session-based naming: {date}-{sessionId}.log
- * - Auto cleanup: removes logs older than 30 days on startup
+ *
+ * Retention: handled by `./log-retention.ts` for the whole `~/.myagents/logs/`
+ * directory (age + byte budget across all sources). Per-session log files
+ * had no byte budget pre-#121; they share the unified policy now.
  */
 
-import { readdirSync, unlinkSync, statSync } from 'fs';
 import { createWriteStream, type WriteStream } from 'fs';
 import { join } from 'path';
 
-import { LOGS_DIR, LOG_RETENTION_DAYS, ensureLogsDir } from './logUtils';
+import { LOGS_DIR, ensureLogsDir } from './logUtils';
 import { localDate } from '../shared/logTime';
 
 // In-memory log buffer for UI display
@@ -30,48 +32,6 @@ let currentLogFilePath: string | null = null;
  */
 function getLogFilePath(sessionId: string): string {
   return join(LOGS_DIR, `${localDate()}-${sessionId}.log`);
-}
-
-/**
- * Clean up old log files (older than LOG_RETENTION_DAYS)
- * Called on startup
- */
-export function cleanupOldLogs(): void {
-  ensureLogsDir();
-
-  const now = Date.now();
-  const maxAge = LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000; // 30 days in ms
-  let deletedCount = 0;
-
-  try {
-    const files = readdirSync(LOGS_DIR);
-
-    for (const file of files) {
-      // Only clean agent session logs, skip unified-*.log files
-      if (!file.endsWith('.log')) continue;
-      if (file.startsWith('unified-')) continue;
-
-      const filePath = join(LOGS_DIR, file);
-      try {
-        const stat = statSync(filePath);
-        const age = now - stat.mtimeMs;
-
-        if (age > maxAge) {
-          unlinkSync(filePath);
-          deletedCount++;
-        }
-      } catch (err) {
-        // Ignore errors for individual files
-        console.warn(`[AgentLogger] Failed to check/delete ${file}:`, err);
-      }
-    }
-
-    if (deletedCount > 0) {
-      console.log(`[AgentLogger] Cleaned up ${deletedCount} old log files`);
-    }
-  } catch (err) {
-    console.error('[AgentLogger] Failed to cleanup old logs:', err);
-  }
 }
 
 /**

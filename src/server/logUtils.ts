@@ -9,7 +9,8 @@ import { ensureDirSync } from './utils/fs-utils';
 
 export const MYAGENTS_DIR = join(homedir(), '.myagents');
 export const LOGS_DIR = join(MYAGENTS_DIR, 'logs');
-export const LOG_RETENTION_DAYS = 30;
+// Retention policy moved to `./log-retention.ts` (#121, 2026-05). Keeping a
+// re-export of LOGS_DIR + ensureLogsDir as the only API of this module.
 
 /**
  * Ensure logs directory exists

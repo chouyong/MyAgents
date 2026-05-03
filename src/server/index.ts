@@ -279,8 +279,8 @@ import {
   markDeferredInitReady,
   setDeferredInitPhase,
 } from './readiness-state';
-import { cleanupOldLogs } from './AgentLogger';
-import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
+import { appendUnifiedLogBatch, getRecentLogLines, getActiveUnifiedLogPath } from './UnifiedLogger';
+import { runLogRetentionSweep, startPeriodicSweep } from './log-retention';
 import { createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
@@ -7968,8 +7968,22 @@ description: >
     try {
       currentInitPhase = 'cleanup';
       setDeferredInitPhase(currentInitPhase);
-      cleanupOldLogs();
-      cleanupOldUnifiedLogs();
+      // Unified retention sweep (#121) — replaces v0.2.7's split between
+      // cleanupOldLogs (per-session) + cleanupOldUnifiedLogs (unified). One
+      // policy module covers age cutoff, byte budget, and the recent-data
+      // floor across all sources. Per-session logs gained a byte budget
+      // here for the first time.
+      const activeUnified = getActiveUnifiedLogPath();
+      runLogRetentionSweep({
+        activeFilePaths: activeUnified ? new Set([activeUnified]) : undefined,
+      });
+      // Hourly background sweep — bounds gradual growth without waiting
+      // for the next 50MB rotation event. Active-file getter is invoked
+      // at each sweep so day-rollovers are reflected.
+      startPeriodicSweep(() => {
+        const p = getActiveUnifiedLogPath();
+        return p ? new Set([p]) : new Set();
+      });
       cleanupStalePlaywrightProfile();
 
       currentInitPhase = 'skill-seed';
