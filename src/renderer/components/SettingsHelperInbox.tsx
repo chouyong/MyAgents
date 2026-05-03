@@ -10,15 +10,19 @@
 // design rationale.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, Paperclip, Send, X } from 'lucide-react';
+import { History, Loader2, Paperclip, Send, X } from 'lucide-react';
 
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useImageAttachments } from '@/hooks/useImageAttachments';
 import { HelperModelPicker, resolveInitialHelperModel } from '@/components/HelperModelPicker';
+import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
 import { track } from '@/analytics';
 import Tip from '@/components/Tip';
+import { useConfigData } from '@/config/useConfigData';
+import { useConfigActions } from '@/config/useConfigActions';
+import { ensureSelfAwarenessWorkspace } from '@/config/configService';
 
 const PLACEHOLDER =
     '告诉 AI 小助理想做什么，配模型、加 MCP、查问题、吐槽反馈，提出你的要求，附上网页链接或截图，小助理都能帮你直接搞定！';
@@ -48,6 +52,60 @@ export default function SettingsHelperInbox({
     const [isSending, setIsSending] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { openPreview } = useImagePreview();
+
+    // History popover state. agentDir is derived from projects (single source
+    // of truth — disk via ConfigProvider). Helper project may not exist yet
+    // if user has never sent a message; in that case we lazily ensure on the
+    // first 历史 click rather than eagerly creating it on Settings open.
+    const [showHistory, setShowHistory] = useState(false);
+    const historyBtnRef = useRef<HTMLButtonElement>(null);
+    // Synchronous in-flight latch — same shape as `sendingRef` below. Blocks
+    // double-click race that would otherwise fire two parallel ensureSelf-
+    // AwarenessWorkspace calls before ConfigProvider's setProjects commit.
+    const historyEnsuringRef = useRef(false);
+    const { projects } = useConfigData();
+    const { addProject, patchProject } = useConfigActions();
+
+    const helperAgentDir = useMemo(() => {
+        const helperProject = projects.find(p => p.internal === true);
+        return helperProject?.path ?? '';
+    }, [projects]);
+
+    const handleHistoryClick = useCallback(async () => {
+        if (showHistory) {
+            setShowHistory(false);
+            return;
+        }
+        if (!helperAgentDir) {
+            if (historyEnsuringRef.current) return;
+            historyEnsuringRef.current = true;
+            try {
+                // Lazy ensure — addProject mutates ConfigProvider state, so the
+                // useMemo above re-derives agentDir on the next render after this
+                // await resolves. Dropdown then mounts with a real agentDir and
+                // surfaces the standard "暂无历史记录" empty state.
+                const project = await ensureSelfAwarenessWorkspace(projects, addProject, patchProject);
+                if (!project) {
+                    console.warn('[SettingsHelperInbox] ensureSelfAwarenessWorkspace returned null');
+                    return;
+                }
+            } finally {
+                historyEnsuringRef.current = false;
+            }
+            // Settings panel may have closed during the await — bail before
+            // touching state on an unmounted component (project red line).
+            if (!mountedRef.current) return;
+        }
+        setShowHistory(true);
+    }, [showHistory, helperAgentDir, projects, addProject, patchProject]);
+
+    const handleSelectHistorySession = useCallback((sessionId: string) => {
+        setShowHistory(false);
+        // Empty description + resumeSessionId → handler skips auto-send and
+        // routes to handleLaunchProject(project, sessionId). New helper Tab
+        // opens (or jumps to existing owner per Session:Tab=1:1).
+        dispatchHelperRequest({ description: '', appVersion, resumeSessionId: sessionId });
+    }, [appVersion]);
 
     const {
         images,
@@ -145,10 +203,40 @@ export default function SettingsHelperInbox({
     return (
         <div className="mb-8">
             {/* Title matches the "模型供应商" h2 below — same visual weight to
-                signal "this is a peer section, not a subtitle". */}
-            <h2 className="mb-4 text-lg font-semibold text-[var(--ink)]">
-                AI 小助理
-            </h2>
+                signal "this is a peer section, not a subtitle". 历史 button
+                on the right reuses Chat tab's SessionHistoryDropdown so users
+                can jump into past helper conversations without first opening
+                a Tab. (Issue #120) */}
+            <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                    AI 小助理
+                </h2>
+                <button
+                    ref={historyBtnRef}
+                    type="button"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={handleHistoryClick}
+                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
+                        showHistory
+                            ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+                    }`}
+                >
+                    <History className="h-3.5 w-3.5 flex-shrink-0" />
+                    <span>历史</span>
+                </button>
+                {helperAgentDir && (
+                    <SessionHistoryDropdown
+                        agentDir={helperAgentDir}
+                        currentSessionId={null}
+                        onSelectSession={handleSelectHistorySession}
+                        onDeleteCurrentSession={() => { /* no current session at inbox */ }}
+                        isOpen={showHistory}
+                        onClose={() => setShowHistory(false)}
+                        triggerRef={historyBtnRef}
+                    />
+                )}
+            </div>
             {/* Container has no padding — textarea zone and toolbar zone
                 each carry their own. This keeps the toolbar's vertical
                 padding symmetric (py-2) so the buttons sit centered in the

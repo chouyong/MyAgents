@@ -2105,9 +2105,61 @@ export default function App() {
       model?: string;
       appVersion: string;
       images?: ImageAttachment[];
+      resumeSessionId?: string;
     }>) => {
-      const { description, appVersion, providerId, model } = event.detail;
+      const { description, appVersion, providerId, model, resumeSessionId } = event.detail;
       try {
+        // Resume path runs FIRST and out-of-order with the MAX_TABS guard:
+        // if the helper session is already owned by another Tab, we just
+        // jump there (Session : Tab = 1:1 invariant), which doesn't consume
+        // a Tab slot — so MAX_TABS shouldn't block it.
+        if (resumeSessionId) {
+          const existing = tabsRef.current.find(t => t.sessionId === resumeSessionId);
+          if (existing) {
+            if (activeTabIdRef.current !== existing.id) {
+              setActiveTabId(existing.id);
+              activeTabIdRef.current = existing.id;
+            }
+            return;
+          }
+          // No existing owner — we'll need a fresh Tab. Apply MAX_TABS now.
+          if (tabsRef.current.length >= MAX_TABS) {
+            console.warn(`[App] Max tabs (${MAX_TABS}) reached, cannot resume helper session`);
+            return;
+          }
+          const project = await ensureSelfAwarenessWorkspace(
+            configProjectsRef.current,
+            configAddProject,
+            configPatchProject,
+          );
+          if (!project) {
+            console.error('[App] ensureSelfAwarenessWorkspace returned null');
+            return;
+          }
+          // Pre-create a Tab so handleLaunchProject's `switch-current-tab`
+          // default doesn't overwrite the Settings tab (which IS the active
+          // tab when the inbox dispatches). Then reap it post-call if the
+          // planner chose `open-new-tab` (handleLaunchProject creates its
+          // own Tab internally for that branch and our pre-created one is
+          // left empty).
+          const newTab = createNewTab();
+          setTabs((prev) => [...prev, newTab]);
+          setActiveTabId(newTab.id);
+          activeTabIdRef.current = newTab.id;
+          try {
+            await handleLaunchProject(project, resumeSessionId, undefined);
+          } finally {
+            setTabs((prev) => {
+              const created = prev.find(t => t.id === newTab.id);
+              if (created && !created.sessionId && !created.agentDir) {
+                return prev.filter(t => t.id !== newTab.id);
+              }
+              return prev;
+            });
+          }
+          return;
+        }
+
         if (tabsRef.current.length >= MAX_TABS) {
           console.warn(`[App] Max tabs (${MAX_TABS}) reached, cannot open bug report`);
           return;

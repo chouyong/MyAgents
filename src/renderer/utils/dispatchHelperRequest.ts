@@ -28,6 +28,13 @@ export interface HelperRequestInput {
     appVersion: string;
     /** Optional image attachments (data-url previews + File handles). */
     images?: ImageAttachment[];
+    /**
+     * Resume an existing helper session in a new Tab instead of starting a
+     * fresh conversation. When set, `description`/`images`/picker are ignored
+     * — the handler routes to `handleLaunchProject(project, sessionId)` and
+     * Tab title is left to Chat.tsx's natural session-title flow.
+     */
+    resumeSessionId?: string;
 }
 
 export function dispatchHelperRequest(input: HelperRequestInput): void {
@@ -39,6 +46,7 @@ export function dispatchHelperRequest(input: HelperRequestInput): void {
                 model: input.model,
                 appVersion: input.appVersion,
                 images: input.images,
+                resumeSessionId: input.resumeSessionId,
             },
         }),
     );
