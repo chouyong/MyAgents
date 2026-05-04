@@ -266,7 +266,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   }, [value, syncScroll]);
 
   // Auto-grow the textarea with content. Floor = `minLines`; ceiling =
-  // `maxLines` (compact: 8, launcher: 12). Past the ceiling the textarea
+  // `maxLines` (compact: 8, launcher: 9). Past the ceiling the textarea
   // scrolls internally and the mirror overlay tracks via `syncScroll`.
   useLayoutEffect(() => {
     const ta = textareaRef.current;

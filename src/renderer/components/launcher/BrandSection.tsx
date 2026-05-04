@@ -502,7 +502,7 @@ export default memo(function BrandSection({
                                     onCreated={handleThoughtCreated}
                                     variant="launcher"
                                     minLines={3}
-                                    maxLines={12}
+                                    maxLines={9}
                                 />
                             </div>
                         )}

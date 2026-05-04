@@ -250,7 +250,7 @@ const BUILTIN_FALLBACK_SLASH_COMMANDS: SlashCommand[] = [
 const LINE_HEIGHT = 26; // px per line (text-base 16px * leading-relaxed 1.625 = 26px)
 // Auto-grow ceiling. Past this row count the textarea scrolls internally;
 // before it, the resize effect below tracks scrollHeight on every keystroke.
-const MAX_LINES = 12;
+const MAX_LINES = 9;
 // Launcher shows the input as the page's primary affordance — an extra row
 // (3 vs 2) reduces visual compression and signals "there's room to write a
 // full thought", matching the spacious Launcher layout. Chat tabs keep the
