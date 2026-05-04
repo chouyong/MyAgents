@@ -26,7 +26,13 @@ interface ImCronContext {
   workspacePath: string;
   model?: string;
   permissionMode?: string;
+  /** PRD 0.2.9 — DEPRECATED. New code SHOULD pass `providerId` so cron
+   *  ticks live-resolve credentials from `~/.myagents/config.json` and
+   *  rotation propagates. Kept for legacy callers. */
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  /** PRD 0.2.9 — Per-session provider id. When set, cron tasks created
+   *  through this context get `providerId`-based live-resolution. */
+  providerId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfig;
 }
@@ -54,7 +60,10 @@ export interface SessionCronContext {
   workspacePath: string;
   model?: string;
   permissionMode?: string;
+  /** PRD 0.2.9 — DEPRECATED, see ImCronContext.providerEnv. */
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  /** PRD 0.2.9 — Per-session provider id; preferred over providerEnv. */
+  providerId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfig;
 }
@@ -247,10 +256,20 @@ async function imCronToolHandler(args: {
           // override is needed, add it to the `job` schema.
           permissionMode: '',
           providerEnv: addCtx.providerEnv,
-          // PRD #119: explicit routing intent captures the IM session's
-          // current provider state. The cron then preserves that intent
-          // regardless of later agent edits.
-          providerIntent: addCtx.providerEnv ? 'explicit' : 'subscription',
+          // PRD 0.2.9 — Prefer providerId (live-resolve at sidecar) so the
+          // cron task picks up rotated API keys without a re-save. Falls
+          // back to legacy providerEnv snapshot when providerId isn't
+          // available (older callers / IM payloads that haven't been
+          // collapsed yet).
+          providerId: addCtx.providerId,
+          // PRD #119 / 0.2.9: routing intent. When providerId is set,
+          // sidecar ignores intent (live-resolve); otherwise legacy
+          // explicit-vs-subscription split derived from providerEnv.
+          providerIntent: addCtx.providerId
+            ? undefined
+            : addCtx.providerEnv
+              ? 'explicit'
+              : 'subscription',
           runtime: addCtx.runtime,
           runtimeConfig: addCtx.runtimeConfig,
           intervalMinutes: args.job.schedule.kind === 'every' ? args.job.schedule.minutes : 30,

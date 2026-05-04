@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.9] - 2026-05-05
+
+### Added
+
+- **任务中心模型选择器跨厂商**：任务编辑 → 高级配置 → 模型，下拉框现在和 Chat / Agent 设置一样按厂商分组列出全部已配置的 provider；外部 runtime（Codex / Claude Code CLI / Gemini）也有自家的 model picker (#130)。
+
+### Changed
+
+- **Task / Cron 的 provider 路由全面 live-resolve**：任务和定时任务的"模型供应商"覆盖只存 `providerId`（不再持久化 apiKey / baseUrl 等凭据）。Sidecar 在每次执行时实时从 `~/.myagents/config.json` 解析 provider 配置——轮换 API Key 立即对在跑的任务生效，不需要重新保存。
+- **Schema 强约束**：写入 task 时强制 `providerId` 与 `model` 配对；外部 runtime（codex / claude-code / gemini）禁止同时持有 builtin `providerId`——避免静默错路由。
+
+### Fixed
+
+- **Cron 切回订阅时仍跑在上一个第三方 provider**：PRD #119 留下的潜在 bug —— `/cron/execute(-sync)` 在 subscription 分支没传显式 sentinel，导致 sidecar 实际"保持当前 provider"。修复后跨 provider 切换语义正确。
+- **Provider 删除后老 cron 还在用旧 key**：删除 provider 配置后，下一次 cron tick 拒绝执行并把任务标 Blocked，而不是用旧 frozen credential 偷跑。
+
+### Migration
+
+- 已存在的定时任务（0.2.8 及更早创建、带 frozen `provider_env`）启动时会被识别并保留兼容路径，行为不变；用户在任务编辑面板保存任意修改一次即可迁移到新的 live-resolve 路径。Sidecar 启动日志会输出 `[CronTask] N legacy task(s) still carry frozen provider_env` 便于追踪。
+
+---
+
 ## [0.2.8] - 2026-05-03
 
 ### Added

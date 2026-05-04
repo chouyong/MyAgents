@@ -19,7 +19,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -465,24 +465,20 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (cron && cron.executionTarget === 'new_task') {
             try {
                 const standaloneSessionId = `cron-standalone-${crypto.randomUUID()}`;
-                // Build providerEnv inline (mirrors Chat.tsx::buildProviderEnv).
-                // Subscription auth and external runtimes both leave providerEnv
-                // undefined — same gating Chat.tsx:938 uses.
-                const aliases = launcherProvider
-                    ? getEffectiveModelAliases(launcherProvider, config.providerModelAliases)
-                    : null;
-                const providerEnv = (!isExternalRuntime && launcherProvider && launcherProvider.type !== 'subscription')
-                    ? {
-                        baseUrl: launcherProvider.config.baseUrl,
-                        apiKey: apiKeys[launcherProvider.id],
-                        authType: launcherProvider.authType,
-                        apiProtocol: launcherProvider.apiProtocol,
-                        maxOutputTokens: launcherProvider.maxOutputTokens,
-                        maxOutputTokensParamName: launcherProvider.maxOutputTokensParamName,
-                        upstreamFormat: launcherProvider.upstreamFormat,
-                        ...(aliases ? { modelAliases: aliases } : {}),
-                    }
-                    : undefined;
+                // PRD 0.2.9 — Collapsed-writer path. Send `providerId` only
+                // and let the sidecar live-resolve the env (apiKey, baseUrl,
+                // authType, modelAliases, ...) on every tick. This avoids
+                // duplicating credentials into ~/.myagents/cron_tasks.json
+                // and makes API key rotation propagate without user action.
+                //
+                // External runtimes don't carry a providerId (they manage
+                // their own provider via their CLI). When the runtime is
+                // external, providerId is undefined → sidecar follows the
+                // agent's runtime resolution.
+                const launcherProviderId =
+                    !isExternalRuntime && launcherProvider
+                        ? launcherProvider.id
+                        : undefined;
                 const created = await createCronTask({
                     workspacePath: selectedWorkspace.path,
                     sessionId: standaloneSessionId,
@@ -496,12 +492,13 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     name: cron.name,
                     permissionMode: launcherPermissionMode,
                     model: builtinSelection?.model ?? runtimeModel,
-                    providerEnv,
-                    // PRD #119: capture explicit routing intent at scheduling
-                    // time. Standalone launcher crons have no chat session
-                    // they "follow" — the user is explicitly building this
-                    // task, so its provider config is its own intent.
-                    providerIntent: providerEnv ? 'explicit' : 'subscription',
+                    providerId: launcherProviderId,
+                    // PRD 0.2.9 — When `providerId` is set the sidecar ignores
+                    // intent (live-resolve takes precedence). We still send
+                    // `subscription` for the no-providerId subscription case
+                    // so legacy /cron/execute paths handle it correctly until
+                    // all callers move to providerId-only.
+                    providerIntent: launcherProviderId ? undefined : 'subscription',
                     runtime: launcherRuntime,
                     runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
                     // Snapshot the launcher's MCP selection so the cron task's
@@ -534,7 +531,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         onLaunchProject(selectedWorkspace, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
-        isExternalRuntime, launcherRuntime, apiKeys, config.providerModelAliases,
+        isExternalRuntime, launcherRuntime,
         touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)

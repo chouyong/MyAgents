@@ -33,9 +33,13 @@ export interface CronTaskState {
     model?: string;
     /** Permission mode (captured at task creation time) */
     permissionMode?: string;
-    /** Provider environment (captured at task creation time) */
+    /** PRD 0.2.9 — DEPRECATED legacy frozen env. Kept for back-compat
+     *  with paths that haven't been collapsed to providerId yet. */
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
-    /** PRD #119: explicit routing intent — see `CronProviderIntent`. */
+    /** PRD 0.2.9 — Per-cron provider id; sidecar live-resolves env at every tick. */
+    providerId?: string;
+    /** PRD #119 / 0.2.9: explicit routing intent — see `CronProviderIntent`.
+     *  Sidecar ignores this when `providerId` is set. */
     providerIntent?: 'followAgent' | 'subscription' | 'explicit';
     /** Agent runtime snapshot for external Runtime tasks */
     runtime?: RuntimeType;
@@ -130,12 +134,22 @@ export function useCronTask(options: UseCronTaskOptions) {
         notifyEnabled: config.notifyEnabled,
         model: config.model,
         permissionMode: config.permissionMode,
+        // PRD 0.2.9 — Prefer `providerId` (live-resolve at sidecar) over
+        // `providerEnv` (deprecated frozen snapshot). Both are accepted so
+        // legacy callers still work; sidecar prefers providerId when set.
         providerEnv: config.providerEnv,
-        // PRD #119: capture intent at enable time. Defaults derived from
-        // current providerEnv (subscription if absent, explicit if present)
-        // so existing call sites that don't set this still get correct
-        // intent. Caller can override explicitly for unusual cases.
-        providerIntent: config.providerIntent ?? (config.providerEnv ? 'explicit' : 'subscription'),
+        providerId: config.providerId,
+        // PRD #119 / 0.2.9 — When providerId is set, intent is ignored by
+        // sidecar (live-resolve takes precedence). Otherwise we fall back
+        // to the legacy explicit-vs-subscription split derived from
+        // providerEnv presence so legacy crons still route correctly.
+        providerIntent:
+          config.providerIntent
+          ?? (config.providerId
+            ? undefined
+            : config.providerEnv
+              ? 'explicit'
+              : 'subscription'),
         runtime: config.runtime,
         runtimeConfig: config.runtimeConfig,
         schedule: config.schedule,
@@ -224,7 +238,9 @@ export function useCronTask(options: UseCronTaskOptions) {
 
     let createdTaskId: string | null = null;
     try {
-      // Create the task with model, permissionMode, and providerEnv captured at enableCronMode time
+      // PRD 0.2.9 — Forward providerId (live-resolve) when set; fall back
+      // to legacy providerEnv path otherwise. Both can coexist on the
+      // payload; sidecar prefers providerId when present.
       const task = await createCronTask({
         workspacePath,
         sessionId,
@@ -237,11 +253,15 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: currentConfig.model,
         permissionMode: currentConfig.permissionMode,
         providerEnv: currentConfig.providerEnv,
-        // PRD #119: capture explicit routing intent. presence/absence of
-        // providerEnv at scheduling time determines whether this cron will
-        // run on subscription or on a specific third-party provider — and
-        // that intent persists regardless of later agent edits.
-        providerIntent: currentConfig.providerIntent ?? (currentConfig.providerEnv ? 'explicit' : 'subscription'),
+        providerId: currentConfig.providerId,
+        // PRD #119 / 0.2.9 — see enableCronMode for the same fallback rules.
+        providerIntent:
+          currentConfig.providerIntent
+          ?? (currentConfig.providerId
+            ? undefined
+            : currentConfig.providerEnv
+              ? 'explicit'
+              : 'subscription'),
         runtime: currentConfig.runtime,
         runtimeConfig: currentConfig.runtimeConfig,
         schedule: currentConfig.schedule,
@@ -711,7 +731,13 @@ export function useCronTask(options: UseCronTaskOptions) {
         notifyEnabled: task.notifyEnabled,
         model: task.model,
         permissionMode: task.permissionMode,
+        // PRD 0.2.9 — Restore `providerId` so editing/re-saving a
+        // live-resolve cron through this state preserves the new path.
+        // Without this, edit-then-save would silently drop the field
+        // (Codex P2.3). `providerEnv` is kept as a legacy fallback for
+        // pre-0.2.9 cron tasks that haven't yet migrated.
         providerEnv: task.providerEnv,
+        providerId: task.providerId,
         runtime: task.runtime,
         runtimeConfig: task.runtimeConfig,
         delivery: task.delivery,

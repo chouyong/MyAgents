@@ -56,6 +56,7 @@
 | Plugin Bridge / OpenClaw / SDK shim | `tech_docs/plugin_bridge_architecture.md` |
 | Claude Code / Codex / Gemini Runtime | `tech_docs/multi_agent_runtime.md` |
 | Session ID / 存储 / 状态同步 | `tech_docs/session_architecture.md` |
+| Task / Cron provider routing 三层架构 | `tech_docs/task_provider_routing.md` |
 | 全文搜索（Tantivy / jieba） | `tech_docs/search_architecture.md` |
 | 内置 Node.js / SDK native binary / PATH 注入 | `tech_docs/bundled_node.md` |
 | `myagents` CLI / Admin API | `tech_docs/cli_architecture.md` |

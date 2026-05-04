@@ -935,7 +935,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             delivery: initialMessage.cron.delivery,
             model: effectiveModel,
             permissionMode: effectivePermission,
-            providerEnv: isExternalRuntime ? undefined : providerEnv,
+            // PRD 0.2.9 — Pass providerId (live-resolve) instead of building
+            // a frozen providerEnv. External runtimes carry no providerId.
+            providerId: !isExternalRuntime && provider ? provider.id : undefined,
             runtime: currentRuntime,
             runtimeConfig: buildCronRuntimeConfig(),
             // Without this, the editor reopens defaulting to 'current_session'
@@ -992,7 +994,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               delivery: initialMessage.cron.delivery,
               model: effectiveModel,
               permissionMode: effectivePermission,
-              providerEnv: isExternalRuntime ? undefined : providerEnv,
+              // PRD 0.2.9 — see above for the providerId rationale.
+              providerId: !isExternalRuntime && provider ? provider.id : undefined,
               runtime: currentRuntime,
               runtimeConfig: buildCronRuntimeConfig(),
               executionTarget: initialMessage.cron.executionTarget,
@@ -2041,13 +2044,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               notifyEnabled: cron.config.notifyEnabled,
               model: cron.config.model,
               permissionMode: cron.config.permissionMode,
+              // PRD 0.2.9 — Forward the live-resolve providerId; sidecar
+              // re-reads provider config on every tick so credential
+              // rotation propagates without re-saving the cron.
+              providerId: cron.config.providerId,
               providerEnv: cron.config.providerEnv,
-              // PRD #119: capture explicit routing intent at scheduling time.
-              // The chat's current providerEnv determines whether this cron
-              // intends to run on subscription (no providerEnv) or on a
-              // specific provider (with providerEnv). The cron then preserves
-              // that intent regardless of any later agent changes.
-              providerIntent: cron.config.providerEnv ? 'explicit' : 'subscription',
+              providerIntent:
+                cron.config.providerIntent
+                ?? (cron.config.providerId
+                  ? undefined
+                  : cron.config.providerEnv
+                    ? 'explicit'
+                    : 'subscription'),
               runtime: cron.config.runtime,
               runtimeConfig: cron.config.runtimeConfig,
               schedule: cron.config.schedule,
@@ -3402,15 +3410,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         initialConfig={cronState.config}
         workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
-          const providerEnv = buildProviderEnv(currentProvider);
-
-          // Both paths: enable cron mode (shows status bar, waits for user to type and send)
-          // The difference is handled at send time based on executionTarget
+          // PRD 0.2.9 — Forward `providerId` (live-resolve at sidecar)
+          // instead of building a frozen `providerEnv` snapshot. The
+          // sidecar reads provider config from disk on every tick, so
+          // credential rotation propagates without re-saving the cron.
+          // External runtimes manage their own provider — no providerId.
           const enrichedConfig = {
             ...config,
             model: isExternalRuntime ? undefined : selectedModel,
             permissionMode: isExternalRuntime ? undefined : permissionMode,
-            providerEnv: isExternalRuntime ? undefined : providerEnv,
+            providerId:
+              !isExternalRuntime && currentProvider ? currentProvider.id : undefined,
             runtime: currentRuntime,
             runtimeConfig: buildCronRuntimeConfig(),
             executionTarget: config.executionTarget,
