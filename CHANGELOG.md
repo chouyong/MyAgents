@@ -11,31 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **任务中心模型选择器跨厂商**：任务编辑 → 高级配置 → 模型，下拉框现在和 Chat / Agent 设置一样按厂商分组列出全部已配置的 provider；外部 runtime（Codex / Claude Code CLI / Gemini）也有自家的 model picker (#130)。
-- **架构边界 lint 层（dependency-cruiser）**：`npm run lint` 串入了 `lint:deps`，强制 6 条架构规则（builtin MCP 工厂隔离、renderer ↔ sidecar 进程边界、`src/shared/` 纯净、no-circular），违规 CI 直接 fail。配置见 `.dependency-cruiser.cjs`。
+- **任务模型选择器跨厂商**：任务编辑 → 高级配置 → 模型，按厂商分组列出全部已配置的 provider；外部 runtime（Codex / Claude Code / Gemini）也有自家 picker (#130)。
+- **Markdown 链接 Cmd/Ctrl+click 直开系统浏览器**：绕过内置浏览器面板 (#126)。
+- **输入框自动撑高**：去掉手动展开按钮，最多 9 行后内部滚动 (#129)。
 
 ### Changed
 
-- **Task / Cron 的 provider 路由全面 live-resolve**：任务和定时任务的"模型供应商"覆盖只存 `providerId`（不再持久化 apiKey / baseUrl 等凭据）。Sidecar 在每次执行时实时从 `~/.myagents/config.json` 解析 provider 配置——轮换 API Key 立即对在跑的任务生效，不需要重新保存。
-- **Schema 强约束**：写入 task 时强制 `providerId` 与 `model` 配对；外部 runtime（codex / claude-code / gemini）禁止同时持有 builtin `providerId`——避免静默错路由。
-- **CLAUDE.md 红线表加 Lint 列**：每条红线现在标注 `clippy` / `eslint` / `depcruise` / `—`，让 AI 加载 CLAUDE.md 时一眼区分"工具拦"和"靠记忆"。新增"lint message 写法约定"——所有 reason 字符串 MUST 同时讲 WHY（违规会发生什么）和 WHAT（正确做法），LLM 是主要读者。
-- **Pit-of-Success lint 覆盖大幅扩展**（10+ 条新红线进工具链）：
-  - clippy: `reqwest::Client::new` / `which::which` / `std::process::Command::new` / `log::*` 宏
-  - eslint: `Atomics.wait` / `toISOString().split('T')[0]` UTC 日期 / `__dirname` 在 sidecar / 原生 `<select>` / `tools/` + `plugin-bridge/` 裸 `fetch()` / `shouldAbortSession = true` 直赋值
-  - 顺手把 sidecar 跨进程 import 整理掉：`renderer/config/types.ts` 移到 `src/shared/config-types.ts`（renderer 留一行 barrel re-export 保证向后兼容）
+- **Task / Cron provider 路由 live-resolve**：持久层只存 `providerId`，不再写 apiKey / baseUrl。Sidecar 每次 tick 从 `~/.myagents/config.json` 实时解析——轮换 API Key 立即生效，无需重存任务。
+- **Schema 强约束**：写入时校验 `providerId` 与 `model` 配对；外部 runtime 禁止同时持有 `providerId`，避免静默错路由。
+- **架构 lint 三层加固**：clippy 加 `reqwest`/`which`/`Command::new`/`log::*` 禁令；eslint 加 `Atomics.wait`、UTC 日期、sidecar `__dirname`、原生 `<select>`、tools/bridge 裸 `fetch()`、`shouldAbortSession = true`；新增 dependency-cruiser 6 条架构规则（`npm run lint:deps`）。CLAUDE.md 红线表加 Lint 列，每条标注是否工具拦截。
 
 ### Fixed
 
-- **Cron 切回订阅时仍跑在上一个第三方 provider**：PRD #119 留下的潜在 bug —— `/cron/execute(-sync)` 在 subscription 分支没传显式 sentinel，导致 sidecar 实际"保持当前 provider"。修复后跨 provider 切换语义正确。
-- **Provider 删除后老 cron 还在用旧 key**：删除 provider 配置后，下一次 cron tick 拒绝执行并把任务标 Blocked，而不是用旧 frozen credential 偷跑。
-- **Windows 打开外链每次闪 CMD 黑窗口**：`browser.rs` 走 `cmd /C start`，`cmd.exe` 是 console-subsystem 程序，没设 `CREATE_NO_WINDOW` 就会闪。改走 `process_cmd::new("cmd")` 后窗口不再闪。lint 加 `Command::new` 禁令时顺手抓出。
-- **Plugin-bridge 8 处裸 `fetch()` 在飞书慢响应时挂死**：`streaming-adapter.ts` 的飞书 API 调用 + `compat-runtime.ts` 的 IM 桥 fetch 全没带 AbortSignal，上游慢响应会让 IM 消息处理一直挂到 OS TCP 超时（分钟级）。改走 `cancellableFetch`（默认 30s 超时 + 父级 abort 信号传递）。
-- **`logger.ts ↔ sse.ts` 静态循环依赖**：抽出 `SSE_INSTANCE_ID` 到新增 leaf 模块 `src/server/sse-instance.ts`，两边都从 leaf import；环断了，sse.ts 保留 re-export 保证向后兼容。
-- **`sidecar.rs` Windows taskkill 重复实现 `CREATE_NO_WINDOW`**：原代码手写 `creation_flags(CREATE_NO_WINDOW)`，等于 `process_cmd::new` 应该自动做的事，写两次就有忘一次的可能。统一走 wrapper。
+- **Cron 切回订阅仍跑在第三方 provider** (#119 残留)：sidecar 现在收到显式 `'subscription'` sentinel 才清 provider。
+- **Provider 删除后老 cron 用旧 key 偷跑**：下一次 tick 拒绝执行并标 Blocked。
+- **Aliyun Bailian Coding Plan 模型探活失败** (#127)：跳过 model discovery。
+- **Windows 打开外链闪 CMD 黑窗**：所有 OS opener 走 `process_cmd::new`。
+- **Plugin-bridge 8 处裸 `fetch()` 在飞书慢响应时挂死**：改走 `cancellableFetch`（30s 超时 + 父级 abort 传递）。
+- **`logger.ts ↔ sse.ts` 静态循环依赖**：抽 `SSE_INSTANCE_ID` 到 leaf 模块 `sse-instance.ts`。
+- **空白 API Key 被当合法 key 发到上游**：`resolveProviderEnv` 现在拒绝纯空白。
+- **skill-sync 重复创建报 `File exists`**：symlink 已正确则 no-op，benign EEXIST 降到 debug。
+- **sidecar/bridge stderr 误标 ERROR**：`[startup]` / `[log-retention]` → INFO，`[sdk-shim]` → WARN，按行首前缀匹配。
 
 ### Migration
 
-- 已存在的定时任务（0.2.8 及更早创建、带 frozen `provider_env`）启动时会被识别并保留兼容路径，行为不变；用户在任务编辑面板保存任意修改一次即可迁移到新的 live-resolve 路径。Sidecar 启动日志会输出 `[CronTask] N legacy task(s) still carry frozen provider_env` 便于追踪。
+- 0.2.8 及更早的定时任务带 frozen `provider_env` 仍可加载并运行（兼容路径），用户在编辑面板保存任意一次即迁到 live-resolve；sidecar 启动日志输出 `[CronTask] N legacy task(s) still carry frozen provider_env` 便于追踪。
 
 ---
 
