@@ -1055,7 +1055,17 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    ulog_error!("[bridge-err][{}] {}", bot_id_clone, line);
+                    // Same classification as sidecar stderr — plugin-bridge
+                    // shares the sdk-shim warnings, log-retention audit, etc.
+                    // See `crate::sidecar::classify_sidecar_stderr`.
+                    match crate::sidecar::classify_sidecar_stderr(&line) {
+                        crate::sidecar::SidecarStderrLevel::Info =>
+                            ulog_info!("[bridge-err][{}] {}", bot_id_clone, line),
+                        crate::sidecar::SidecarStderrLevel::Warn =>
+                            ulog_warn!("[bridge-err][{}] {}", bot_id_clone, line),
+                        crate::sidecar::SidecarStderrLevel::Error =>
+                            ulog_error!("[bridge-err][{}] {}", bot_id_clone, line),
+                    }
                 }
             });
         }

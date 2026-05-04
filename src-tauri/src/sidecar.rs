@@ -224,6 +224,46 @@ const STARTUP_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] = &[
     crate::process_cleanup::ProcessPattern::new("nodejs", "/myagents/nodejs/"),
 ];
 
+// ===== Sidecar stderr classification =====
+//
+// Node.js writes to stderr from a few intentional informational paths
+// (startup beacon, log-retention sweep audit, sdk-shim warnings). The
+// pre-existing default of "stderr ⇒ ERROR" surfaced these as red lines in
+// the unified log and broke `grep ERROR` for monitoring. Recognise the
+// known prefixes and downgrade.
+//
+// NOTE on adding new entries: only demote messages that are unconditionally
+// non-actionable. If a prefix EVER signals a real problem, leave it on
+// ERROR — false negatives in this table are far worse than the noise.
+
+#[derive(Clone, Copy)]
+pub(crate) enum SidecarStderrLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+pub(crate) fn classify_sidecar_stderr(line: &str) -> SidecarStderrLevel {
+    // INFO: pure progress / audit output that just happens to land on
+    // stderr because the sidecar logger writes there before unified
+    // logging is wired up.
+    //   - `[startup]` startupBeacon, fired before stdout drain is hooked.
+    //   - `[log-retention]` daily / on-demand sweep audit (deleted N old
+    //     files, etc.) — see `src/server/log-retention.ts::safeStderr`.
+    if line.contains("[startup]") || line.contains("[log-retention]") {
+        return SidecarStderrLevel::Info;
+    }
+    // WARN: real warnings the sidecar emits via `console.warn`. The
+    // `[sdk-shim]` "not implemented in Bridge mode" lines warn that an
+    // openclaw plugin reached for an SDK method the bridge doesn't
+    // implement. They are expected (the shim is intentionally partial)
+    // but worth keeping visible at WARN level for plugin developers.
+    if line.contains("[sdk-shim]") {
+        return SidecarStderrLevel::Warn;
+    }
+    SidecarStderrLevel::Error
+}
+
 // ===== Startup cleanup synchronization =====
 //
 // `cleanup_stale_sidecars` is now hoisted off the main thread (see
@@ -1970,17 +2010,24 @@ pub fn start_tab_sidecar<R: Runtime>(
         });
     }
 
-    // 启动线程捕获 stderr → 写入统一日志
+    // 启动线程捕获 stderr → 写入统一日志。
+    //
+    // 不是所有 sidecar stderr 都是 ERROR：Node.js 的 `console.warn` /
+    // 直接 `process.stderr.write` 在 sidecar 里有几处合法的 informational
+    // 用法，盲目标 ERROR 会让 unified log 出现假阳性（grep ERROR 拿到无关
+    // 噪音）。识别已知 informational/warn 前缀，按真实严重度落级。
     if let Some(stderr) = child.stderr.take() {
         let tab_id_clone = tab_id.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                // startupBeacon 故意通过 stderr 输出 startup 进度，降级为 INFO 避免日志噪音
-                if line.contains("[startup]") {
-                    ulog_info!("[bun-err][{}] {}", tab_id_clone, line);
-                } else {
-                    ulog_error!("[bun-err][{}] {}", tab_id_clone, line);
+                match classify_sidecar_stderr(&line) {
+                    SidecarStderrLevel::Info =>
+                        ulog_info!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Warn =>
+                        ulog_warn!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Error =>
+                        ulog_error!("[bun-err][{}] {}", tab_id_clone, line),
                 }
             }
         });
@@ -3002,10 +3049,13 @@ fn create_new_session_sidecar<R: Runtime>(
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                if line.contains("[startup]") {
-                    ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line);
-                } else {
-                    ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line);
+                match classify_sidecar_stderr(&line) {
+                    SidecarStderrLevel::Info =>
+                        ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line),
+                    SidecarStderrLevel::Warn =>
+                        ulog_warn!("[bun-err][session:{}] {}", session_id_for_log, line),
+                    SidecarStderrLevel::Error =>
+                        ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line),
                 }
             }
         });

@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::ulog_warn;
+use crate::{ulog_debug, ulog_warn};
 
 use super::skills_config::read_disabled_list;
 use super::platform_blocks::is_skill_blocked_on_platform;
@@ -126,21 +126,43 @@ fn sync_skills_subtree(workspace: &Path, myagents_root: &Path) {
         // Skip if a real (non-symlink) project dir exists — don't overwrite.
         // `symlink_metadata` (NOT `metadata`) so a broken symlink also
         // surfaces here as occupied; we then remove and re-create.
+        //
+        // Idempotent fast path: if the link already points at the right
+        // target, do nothing. The previous logic always remove+recreated,
+        // which (a) was wasteful and (b) produced spurious `File exists`
+        // warnings when the remove silently failed (we ignore the error)
+        // or when a concurrent reader recreated the link before our create
+        // landed.
         match fs::symlink_metadata(&link_path) {
             Ok(meta) if !meta.is_symlink() => continue, // real dir, leave alone
             Ok(_) => {
+                if fs::read_link(&link_path).ok().as_deref() == Some(target.as_path()) {
+                    continue; // already correct — no-op
+                }
                 let _ = remove_symlink_or_dir(&link_path);
             }
             Err(_) => { /* doesn't exist — go create */ }
         }
 
         if let Err(e) = create_symlink_dir(&target, &link_path) {
-            ulog_warn!(
-                "[skill-sync] symlink {} → {} failed: {}",
-                link_path.display(),
-                target.display(),
-                e
-            );
+            // `AlreadyExists` is benign here — the link landed via a
+            // concurrent path (skill-sync runs on workspace open + tab
+            // close + sidecar restart, all of which can race on the same
+            // workspace). Demote to debug to keep the unified log clean.
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ulog_debug!(
+                    "[skill-sync] symlink {} → {} already exists (concurrent sync) — ignoring",
+                    link_path.display(),
+                    target.display(),
+                );
+            } else {
+                ulog_warn!(
+                    "[skill-sync] symlink {} → {} failed: {}",
+                    link_path.display(),
+                    target.display(),
+                    e
+                );
+            }
         }
     }
 
@@ -191,10 +213,14 @@ fn sync_commands_subtree(workspace: &Path, myagents_root: &Path) {
         managed.insert(name.clone());
         let link_path = project_commands.join(&name);
 
-        // Skip real (non-symlink) project files.
+        // Skip real (non-symlink) project files. Same idempotent fast
+        // path as `sync_skills_subtree` (above) — see that comment for why.
         match fs::symlink_metadata(&link_path) {
             Ok(meta) if !meta.is_symlink() => continue,
             Ok(_) => {
+                if fs::read_link(&link_path).ok().as_deref() == Some(target.as_path()) {
+                    continue;
+                }
                 let _ = remove_symlink_or_dir(&link_path);
             }
             Err(_) => { /* doesn't exist */ }
@@ -203,12 +229,21 @@ fn sync_commands_subtree(workspace: &Path, myagents_root: &Path) {
         if let Err(e) = create_symlink_file(&target, &link_path) {
             // File symlinks on Windows require Developer Mode. We log + skip
             // the entry instead of aborting the whole sync — matches sidecar.
-            ulog_warn!(
-                "[skill-sync] command symlink {} → {} failed: {}",
-                link_path.display(),
-                target.display(),
-                e
-            );
+            // Benign EEXIST (concurrent skill-sync) demoted to debug.
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ulog_debug!(
+                    "[skill-sync] command symlink {} → {} already exists (concurrent sync) — ignoring",
+                    link_path.display(),
+                    target.display(),
+                );
+            } else {
+                ulog_warn!(
+                    "[skill-sync] command symlink {} → {} failed: {}",
+                    link_path.display(),
+                    target.display(),
+                    e
+                );
+            }
         }
     }
 
