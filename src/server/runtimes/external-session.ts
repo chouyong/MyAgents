@@ -163,6 +163,7 @@ function resetModuleState(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   pendingPermissionSuggestions.clear();
+  drainPendingInteractiveRequestsAsExpired('reset');
   pendingExternalAskUserQuestions.clear();
   pendingExternalInteractiveRequests.clear();
   externalSystemInitPayload = null;
@@ -170,6 +171,38 @@ function resetModuleState(): void {
   isPrewarmingSession = false;
   earlyBroadcastedUserMsg = null;
   deferredRuntimeSessionId = null;
+}
+
+/**
+ * PRD #131 (Codex review #4) — drain pending interactive requests by
+ * broadcasting `*:expired` so the frontend modal clears before we wipe the
+ * map. Mirrors the builtin handlers' lifecycle (handleAskUserQuestion's
+ * timer/onAbort paths in agent-session.ts). Without this, an external
+ * runtime stop / crash / watchdog kill leaves the AskUserQuestion card
+ * visible; the user's late submit then routes to the builtin handler as
+ * "Unknown request".
+ *
+ * `reason` is included in the SSE payload so the frontend (and a future
+ * automated test) can distinguish stop-driven vs error-driven expiry.
+ * Currently the frontend just clears the modal regardless, but keeping
+ * the channel typed lets us add user-visible messaging later without a
+ * second round-trip.
+ */
+function drainPendingInteractiveRequestsAsExpired(reason: 'stop' | 'error' | 'reset'): void {
+  // `pendingExternalInteractiveRequests` only ever holds
+  // `ask-user-question:request` (structured wizard) or `permission:request`
+  // (generic allow/deny card). External runtimes (CC / Codex / Gemini) don't
+  // expose ExitPlanMode / EnterPlanMode tools today, so those `*:expired`
+  // channels stay builtin-only. Filtering by entry.type keeps the broadcast
+  // honest if a future runtime starts using those interactive types.
+  for (const [requestId, entry] of pendingExternalInteractiveRequests) {
+    if (entry.type !== 'ask-user-question:request') continue;
+    try {
+      broadcast('ask-user-question:expired', { requestId, reason });
+    } catch (e) {
+      console.warn(`[external-session] broadcast ask-user-question:expired for ${requestId} failed:`, e);
+    }
+  }
 }
 
 /** Flush accumulated text into a text content block */
@@ -1250,7 +1283,20 @@ export async function respondExternalAskUserQuestion(
   try {
     if (answers === null) {
       console.log(`[external-session] AskUserQuestion cancelled for requestId=${requestId}`);
-      await activeRuntime.respondPermission(activeProcess, requestId, 'deny', '用户取消了问答');
+      // PRD #131 — `interrupt: true` so AskUserQuestion cancel terminates
+      // the whole assistant turn rather than only this single tool call.
+      // Without it, CC keeps the turn alive and the model just calls
+      // another tool, defeating the user's "I'm stopping this" intent.
+      // Mirrors the builtin canUseTool path in agent-session.ts.
+      await activeRuntime.respondPermission(
+        activeProcess,
+        requestId,
+        'deny',
+        '用户取消了问答',
+        undefined,
+        undefined,
+        true,
+      );
     } else {
       console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
       const updatedInput = { ...pending.input, answers };
@@ -1336,6 +1382,7 @@ export async function stopExternalSession(): Promise<boolean> {
     // consistent regardless of what runs next.
     isPrewarmingSession = false;
     pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
+    drainPendingInteractiveRequestsAsExpired('stop');  // PRD #131 — clear stale modals before wiping map
     pendingExternalAskUserQuestions.clear();  // Stale AskUserQuestion requestIds would misroute to new session
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
@@ -1876,6 +1923,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         }
       }
       pendingPermissionSuggestions.clear();
+      drainPendingInteractiveRequestsAsExpired('error');  // PRD #131 — runtime crash/watchdog kill: clear stale modals
       pendingExternalAskUserQuestions.clear();
       pendingExternalInteractiveRequests.clear();
       externalSystemInitPayload = null;

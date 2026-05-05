@@ -647,6 +647,14 @@ export class CodexRuntime implements AgentRuntime {
     process: RuntimeProcess,
     requestId: string,
     decision: 'deny' | 'allow_once' | 'always_allow',
+    /* PRD #131 — interface-uniformity params; Codex's protocol has no
+       suggestions / updatedInput / interrupt knobs, so they're accepted
+       and ignored. Keeping the signature in lockstep with claude-code.ts
+       lets the call site pass arguments unconditionally. */
+    _reason?: string,
+    _suggestions?: unknown[],
+    _updatedInput?: Record<string, unknown>,
+    _interrupt?: boolean,
   ): Promise<void> {
     const codexProc = process as CodexProcess;
     if (codexProc.exited) return;

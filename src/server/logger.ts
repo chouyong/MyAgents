@@ -252,7 +252,11 @@ export function sendLog(level: LogLevel, message: string, meta?: Record<string, 
         if (ctx.runtime) entry.runtime = ctx.runtime;
     }
 
-    originalConsole[level === 'info' ? 'log' : level](message);
+    // PRD #132 — route through safeOriginal so this back-channel respects
+    // the same stdio-broken short-circuit as the patched `console.*`. A
+    // future caller of sendLog() during a closed-pipe state would otherwise
+    // re-seed the EPIPE recursion that #132 was designed to prevent.
+    safeOriginal(level === 'info' ? 'log' : level, [message]);
 
     // Store in history
     logHistory.push(entry);

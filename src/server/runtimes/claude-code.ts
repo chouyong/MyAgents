@@ -424,6 +424,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     reason?: string,
     suggestions?: unknown[],
     updatedInput?: Record<string, unknown>,
+    interrupt?: boolean,
   ): Promise<void> {
     // CC control_response schema (PermissionPromptToolResultSchema.ts):
     // allow: { behavior, updatedInput (required), updatedPermissions?, decisionClassification? }
@@ -454,7 +455,12 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           response: {
             behavior: 'deny' as const,
             message: reason || 'User denied the request',
-            interrupt: false,
+            // PRD #131 — caller passes `interrupt: true` for control-
+            // transfer tools (AskUserQuestion / ExitPlanMode) so the deny
+            // also aborts the whole turn, not just the current tool. Defaults
+            // false so generic permission denies keep the prior "let the
+            // AI try again" semantic.
+            interrupt: interrupt ?? false,
             decisionClassification: 'user_reject' as const,
           },
         },

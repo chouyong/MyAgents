@@ -2282,6 +2282,27 @@ impl CronTaskManager {
         if let Some(pm) = patch.get("permissionMode").and_then(|v| v.as_str()) {
             task.permission_mode = pm.to_string();
         }
+        // PRD #131 / Codex-review #1 — runtime + runtimeConfig projection
+        // from Task → CronTask. Same two-state semantics as model/providerId:
+        //   null     → clear (= follow Agent runtime)
+        //   string   → set the per-task runtime override (builtin / codex / …)
+        // Without these, an existing recurring task whose runtime was
+        // edited in the Task panel kept executing on the original runtime
+        // forever — Task and CronTask drifted out of sync.
+        if let Some(runtime_val) = patch.get("runtime") {
+            if runtime_val.is_null() {
+                task.runtime = None;
+            } else if let Some(s) = runtime_val.as_str() {
+                task.runtime = if s.is_empty() { None } else { Some(s.to_string()) };
+            }
+        }
+        if let Some(rc_val) = patch.get("runtimeConfig") {
+            if rc_val.is_null() {
+                task.runtime_config = None;
+            } else {
+                task.runtime_config = Some(rc_val.clone());
+            }
+        }
         // PRD 0.2.4 §需求 4 — Task → CronTask projection of MCP override.
         // Two-state semantics (mirrors `task.rs::update`):
         //   null OR empty array  → clear (= follow workspace)

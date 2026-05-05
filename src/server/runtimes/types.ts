@@ -164,6 +164,15 @@ export interface AgentRuntime {
     suggestions?: unknown[],
     /** CC: override the tool's input (e.g. AskUserQuestion needs answers injected). Empty = use original. */
     updatedInput?: Record<string, unknown>,
+    /**
+     * PRD #131 — for CC's `behavior: 'deny'` schema this maps to the SDK
+     * `interrupt` field. `true` aborts the assistant turn after the deny
+     * tool_result lands (control-transfer tool semantics: AskUserQuestion
+     * cancellation, ExitPlanMode rejection, …); `false` (default) only
+     * denies this single tool and lets the AI choose another. Other
+     * runtimes can ignore — Codex / Gemini have no equivalent knob today.
+     */
+    interrupt?: boolean,
   ): Promise<void>;
 
   /** Stop the session gracefully */

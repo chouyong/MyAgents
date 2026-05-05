@@ -1063,6 +1063,11 @@ export class GeminiRuntime implements AgentRuntime {
     process: RuntimeProcess,
     requestId: string,
     decision: 'deny' | 'allow_once' | 'always_allow',
+    /* PRD #131 — interface-uniformity, see codex.ts respondPermission. */
+    _reason?: string,
+    _suggestions?: unknown[],
+    _updatedInput?: Record<string, unknown>,
+    _interrupt?: boolean,
   ): Promise<void> {
     const geminiProc = process as GeminiProcess;
     if (geminiProc.exited) return;

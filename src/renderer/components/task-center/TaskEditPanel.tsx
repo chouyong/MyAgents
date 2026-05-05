@@ -461,18 +461,30 @@ export function TaskEditPanel({
     if (draftPermissionMode !== (task.permissionMode ?? '')) {
       payload.permissionMode = draftPermissionMode;
     }
-    if ((draft.runtime ?? '') !== (task.runtime ?? '')) {
-      payload.runtime = draft.runtime;
-    }
-    // PRD 0.2.9 — runtimeConfig diff (external-runtime model/permission).
-    // The Rust `update` path replaces wholesale; compare by JSON shape so
-    // we only forward when actually changed.
+    // PRD 0.2.9 / #131 — runtime + runtimeConfig diff. "Follow Agent" maps
+    // to `draft.runtime === undefined`, which JSON-omits the field — Rust
+    // `update()` then leaves the existing override untouched. Use the
+    // explicit `clearRuntimeOverride` flag for the clear case (mirrors
+    // `clearProviderOverride`) so the round-trip is unambiguous on both
+    // sides.
+    const initialRuntime = task.runtime ?? '';
+    const draftRuntime = draft.runtime ?? '';
     const initialRuntimeConfig = JSON.stringify(task.runtimeConfig ?? null);
     const nextRuntimeConfig = JSON.stringify(draft.runtimeConfig ?? null);
-    if (initialRuntimeConfig !== nextRuntimeConfig) {
-      // RuntimeConfig vs RuntimeConfigSnapshot — structurally compatible,
-      // see DispatchTaskDialog for the cast rationale.
-      payload.runtimeConfig = draft.runtimeConfig as Record<string, unknown> | undefined;
+    const runtimeChanged = initialRuntime !== draftRuntime;
+    const runtimeConfigChanged = initialRuntimeConfig !== nextRuntimeConfig;
+    if (runtimeChanged || runtimeConfigChanged) {
+      const goingToFollowRuntime = !draftRuntime && !draft.runtimeConfig;
+      if (goingToFollowRuntime) {
+        payload.clearRuntimeOverride = true;
+      } else {
+        if (runtimeChanged) payload.runtime = draft.runtime;
+        if (runtimeConfigChanged) {
+          // RuntimeConfig vs RuntimeConfigSnapshot — structurally compatible,
+          // see DispatchTaskDialog for the cast rationale.
+          payload.runtimeConfig = draft.runtimeConfig as Record<string, unknown> | undefined;
+        }
+      }
     }
     // mcpEnabledServers diff. Send an actual array when there's a change;
     // mapping "follow Agent" (draft = undefined) → `[]` since Rust's

@@ -128,9 +128,15 @@ export interface Task {
   dispatchAt?: number;
   /** Per-task model override. When absent, the Agent's default model is used.
    *
-   *  PRD 0.2.9 invariant: `providerId` and `model` are paired — having one
-   *  without the other is rejected by `validate_task_provider_routing`
-   *  on the Rust side. The renderer picker writes both atomically. */
+   *  PRD 0.2.9 pairing rule (asymmetric, by design): setting `providerId`
+   *  REQUIRES `model` — the validator rejects provider-without-model so a
+   *  user that picked a specific provider can't end up routing the Agent's
+   *  default model name to the wrong upstream. The reverse is allowed:
+   *  setting `model` alone means "use the Agent's currently-resolved
+   *  provider but override the model id" — the renderer's grouped picker
+   *  writes a `(providerId, model)` pair atomically; the model-only form
+   *  is reachable only via the CLI / management API for legacy / advanced
+   *  use. */
   model?: string;
   /** PRD 0.2.9 — Per-task provider id override. When absent, the cron follows
    *  the workspace agent. When set, the sidecar live-resolves the provider
@@ -292,6 +298,11 @@ export interface TaskUpdateInput {
   preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
+  /** PRD #131 — Atomic clear of `runtime` + `runtimeConfig`. The
+   *  renderer's "跟随 Agent" runtime option sends this flag because
+   *  `runtime: undefined` deserializes to `None` server-side which the
+   *  apply path leaves untouched. Symmetric with `clearProviderOverride`. */
+  clearRuntimeOverride?: boolean;
   /** Per-task MCP enable list override. Empty array clears (= follow
    *  Agent); a populated array snapshots the chosen server ids. Rust
    *  `update_task` normalises an empty vec → None on persistence. */

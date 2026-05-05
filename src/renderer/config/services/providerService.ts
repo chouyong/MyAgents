@@ -241,7 +241,12 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
 /**
  * Check if a provider has valid credentials (subscription verified or API key present).
  * Subscription providers need verifyStatus.status === 'valid' AND accountEmail.
- * API providers just need a non-empty API key.
+ * API providers just need a non-blank API key (whitespace-only is treated
+ * as absent, matching the sidecar's strict check in
+ * `admin-config.ts::resolveProviderEnv`). Without this trim, a provider
+ * with `apiKey="   "` shows as available in the model picker but the
+ * cron tick rejects it with "no API Key" — the surfaced/runtime
+ * symmetry is what closes the gap.
  */
 export function isProviderAvailable(
     provider: Provider,
@@ -252,7 +257,8 @@ export function isProviderAvailable(
         const result = verifyStatus[provider.id];
         return result?.status === 'valid' && !!result?.accountEmail;
     }
-    return !!apiKeys[provider.id];
+    const key = apiKeys[provider.id];
+    return !!key && key.trim().length > 0;
 }
 
 /**

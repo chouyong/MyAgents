@@ -298,11 +298,14 @@ pub struct Task {
     /// model is used. Proxied into `CronTaskConfig.model` at cron-ensure
     /// time.
     ///
-    /// PRD 0.2.9 invariant: when `provider_id` is set, `model` MUST also be
-    /// set (validated by `validate_task_provider_routing`). Storing
-    /// provider-without-model creates a half-state where execution would
+    /// PRD 0.2.9 pairing rule (asymmetric, by design): when `provider_id`
+    /// is set, `model` MUST also be set (validated by
+    /// `validate_task_provider_routing`) — provider-without-model would
     /// silently route the picked provider's API to the agent's default
-    /// model — exactly the cross-provider misroute that #130 surfaced.
+    /// model and reproduce the cross-provider misroute that #130 surfaced.
+    /// The reverse is intentionally NOT rejected: model-only means "use
+    /// the Agent's currently-resolved provider but override model id",
+    /// reachable from the CLI / management API for legacy / advanced use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// PRD 0.2.9 — Per-task provider id override. When `None` the cron
@@ -591,6 +594,16 @@ pub struct TaskUpdateInput {
     pub runtime: Option<String>,
     #[serde(default)]
     pub runtime_config: Option<serde_json::Value>,
+    /// PRD #131 / Codex-review #2 — symmetric "clear runtime override"
+    /// flag. When true, `runtime` AND `runtime_config` are both reset to
+    /// `None` regardless of what the corresponding fields above carry.
+    /// Without this, the renderer's "跟随 Agent" runtime option could
+    /// not round-trip a clear: `runtime: undefined` over JSON deserializes
+    /// to `None`, but the apply path uses `if let Some(v) = input.runtime`
+    /// which leaves the existing override untouched. Mirrors the
+    /// established pattern from `clear_provider_override`.
+    #[serde(default)]
+    pub clear_runtime_override: bool,
     /// Per-task MCP enable list override (PRD 0.2.4 §需求 4).
     /// `Some(vec![])` clears overrides (= follow Agent); `None` = leave
     /// existing override untouched.
@@ -1599,6 +1612,13 @@ impl TaskStore {
         if let Some(v) = input.runtime_config {
             updated.runtime_config = Some(v);
         }
+        // PRD #131 / Codex-review #2 — atomic clear of runtime + runtime_config.
+        // Applied AFTER the merge so explicit field values get overridden
+        // (matches `clear_provider_override` semantics, line above).
+        if input.clear_runtime_override {
+            updated.runtime = None;
+            updated.runtime_config = None;
+        }
         if let Some(v) = input.mcp_enabled_servers {
             // Two-state semantics (PRD 0.2.4 §需求 4 — "先简单点"):
             //   None / Some([])  → "follow Agent" (no override)
@@ -1712,7 +1732,15 @@ impl TaskStore {
         let exec_overrides_changed = existing.model != updated.model
             || existing.provider_id != updated.provider_id
             || existing.permission_mode != updated.permission_mode
-            || existing.mcp_enabled_servers != updated.mcp_enabled_servers;
+            || existing.mcp_enabled_servers != updated.mcp_enabled_servers
+            // PRD #131 / Codex-review #1 — runtime + runtime_config edits
+            // also need to project to the linked CronTask. Without these in
+            // the change-detection set, switching a recurring task from
+            // builtin to Codex (or changing runtimeConfig.model) updated
+            // the Task row but the CronTask kept executing with the stale
+            // runtime forever.
+            || existing.runtime != updated.runtime
+            || existing.runtime_config != updated.runtime_config;
         let notification_changed = existing.notification != updated.notification;
         let name_or_prompt_changed = existing.name != updated.name || input.prompt.is_some();
 
@@ -1856,6 +1884,30 @@ impl TaskStore {
                             ),
                             None => serde_json::Value::Null,
                         },
+                    );
+                }
+                // PRD #131 / Codex-review #1 — same projection contract for
+                // `runtime` / `runtimeConfig`. null clears (= follow Agent),
+                // a value sets it. Without these, switching the runtime in
+                // a recurring task's editor left the linked CronTask with
+                // the original runtime forever.
+                if existing.runtime != updated.runtime {
+                    patch.insert(
+                        "runtime".to_string(),
+                        updated
+                            .runtime
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if existing.runtime_config != updated.runtime_config {
+                    patch.insert(
+                        "runtimeConfig".to_string(),
+                        updated
+                            .runtime_config
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null),
                     );
                 }
                 if notification_changed {
@@ -3571,6 +3623,7 @@ mod tests {
                 preselected_session_id: None,
                 runtime: None,
                 runtime_config: None,
+                clear_runtime_override: false,
                 mcp_enabled_servers: None,
                 tags: None,
                 notification: None,
