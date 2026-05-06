@@ -3067,7 +3067,7 @@ checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
 
 [[package]]
 name = "myagents"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "axum",
  "base64 0.22.1",

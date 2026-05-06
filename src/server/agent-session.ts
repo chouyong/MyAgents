@@ -1630,6 +1630,70 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
   broadcast('chat:permission-mode-changed', { permissionMode: mode });
 }
 
+/**
+ * In-flight `querySession.setModel()` promise — set by every SDK-side model
+ * dispatch (`setSessionModel`'s fire-and-forget path AND `applySessionConfig`'s
+ * awaited path), cleared when the promise settles.
+ *
+ * Why this exists (Codex adversarial review 2026-05-07):
+ *
+ * The race had three actors that update `currentModel` and call SDK setModel:
+ *
+ *   1. `setSessionModel(M2)` — UI model picker. Sync update of `currentModel`,
+ *      fire-and-forget `querySession.setModel(M2[1m]).catch(...)`. Returns
+ *      before the SDK subprocess has actually swapped.
+ *
+ *   2. `applySessionConfig({ model: M2 })` — runs on every send. Short-circuits
+ *      at `newModel === currentModel`, skipping its own setModel call.
+ *
+ *   3. `enqueueUserMessage` — yields the user's message to the SDK subprocess.
+ *
+ * Without coordination, the user-visible flow "click M2, immediately click
+ * Send" is: (1) sync-updates currentModel + dispatches setModel async →
+ * (2) sees newModel === currentModel and short-circuits → (3) yields the
+ * message — all before the SDK subprocess has processed (1)'s setModel IPC.
+ * The first turn runs on the OLD model.
+ *
+ * Fix: every SDK-side dispatch goes through `dispatchSetModelToSdk()` which
+ * registers the promise here. `applySessionConfig` awaits this promise at
+ * its very top — even when it's about to short-circuit — so by the time
+ * we yield the user's message the SDK is guaranteed to be on the requested
+ * model. The promise self-clears on settle (only if not overwritten by a
+ * newer dispatch in between).
+ */
+let pendingSetModelPromise: Promise<void> | null = null;
+
+/**
+ * Send a model change to the live SDK subprocess and register the in-flight
+ * promise on `pendingSetModelPromise`. Idempotent against `querySession`
+ * being null (returns a resolved promise — fresh subprocess will read
+ * `currentModel` at spawn).
+ *
+ * Caller is responsible for updating `currentModel` itself; this helper
+ * only handles the SDK-IPC side. The split is deliberate: `setSessionModel`
+ * needs to update `currentModel` synchronously (so any concurrent reader
+ * sees the new value), but the IPC is fire-and-forget; `applySessionConfig`
+ * needs to await before updating `currentModel` (so a failed setModel
+ * doesn't leave currentModel ahead of SDK reality).
+ */
+function dispatchSetModelToSdk(model: string): Promise<void> {
+  if (!querySession) return Promise.resolve();
+  const session = querySession;
+  const wrapped = applyContextWindowSuffix(model);
+  const promise = session.setModel(wrapped).catch(err => {
+    console.error('[agent] failed to apply model to running session:', err);
+  });
+  pendingSetModelPromise = promise;
+  // Self-clear on settle. Guard against a newer dispatch having already
+  // overwritten us — that newer dispatch's own settle will do its own clear.
+  promise.finally(() => {
+    if (pendingSetModelPromise === promise) {
+      pendingSetModelPromise = null;
+    }
+  });
+  return promise;
+}
+
 export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 
@@ -1646,11 +1710,11 @@ export function setSessionModel(model: string): void {
   // [1m] tag MUST be applied here too, otherwise switching to a 1M model
   // mid-session keeps the live SDK on the 200K path until the deferred restart
   // below respawns the subprocess.
-  if (querySession) {
-    querySession.setModel(applyContextWindowSuffix(model)).catch(err => {
-      console.error('[agent] failed to apply model to running session:', err);
-    });
-  }
+  //
+  // Fire-and-forget at this seam (UI-driven, no await available), but
+  // `dispatchSetModelToSdk` registers `pendingSetModelPromise` so the next
+  // `applySessionConfig` awaits before yielding the user's message.
+  void dispatchSetModelToSdk(model);
 
   // CLAUDE_CODE_AUTO_COMPACT_WINDOW is baked into the subprocess env at spawn
   // time and cannot be updated on a live process — `querySession.setModel()`
@@ -5346,13 +5410,31 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     }
   }
 
+  // Drain any in-flight setModel from a prior `setSessionModel(...)` BEFORE
+  // we look at the short-circuit. Without this, the "click M2 in the model
+  // picker, immediately click Send" sequence races: setSessionModel updated
+  // `currentModel` synchronously and fired setModel without awaiting, so the
+  // short-circuit `newModel === currentModel` returns true before the SDK
+  // subprocess has swapped — the next SDK turn runs on the OLD model. Awaiting
+  // the registered promise gives the SDK time to ack. (Codex review 2026-05-07.)
+  if (pendingSetModelPromise) {
+    try {
+      await pendingSetModelPromise;
+    } catch {
+      // dispatchSetModelToSdk already logged; we still want to proceed —
+      // a stale setModel failure doesn't block the rest of config sync.
+    }
+  }
+
   // Apply model change if different. Same wrap rationale as setSessionModel():
   // setModel() on the live SDK subprocess updates the model fed into
   // getContextWindowForModel() on subsequent turns, so 1M-window models need
-  // the [1m] tag here too.
+  // the [1m] tag here too. Routed through dispatchSetModelToSdk so any later
+  // applySessionConfig invocation that runs concurrently also drains via
+  // pendingSetModelPromise.
   if (newModel && newModel !== currentModel) {
     try {
-      await querySession.setModel(applyContextWindowSuffix(newModel));
+      await dispatchSetModelToSdk(newModel);
       currentModel = newModel;
       console.log(`[agent] runtime model switched to: ${newModel}`);
     } catch (error) {

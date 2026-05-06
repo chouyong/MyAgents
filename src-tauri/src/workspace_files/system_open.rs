@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::path_safety::{resolve_inside_workspace, validate_workspace_root};
+use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 use crate::process_cmd;
 
 /// Optional workspace context passed by the renderer to widen the
@@ -74,10 +74,16 @@ pub async fn cmd_workspace_open_in_finder(
     path: String,
 ) -> Result<SystemOpenResult, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
-    let target = resolve_inside_workspace(&workspace_root, path.trim())?;
-    if !target.exists() {
-        return Err("File or folder not found".to_string());
-    }
+    // MUST use the canonicalizing resolver, NOT lexical `resolve_inside_workspace`.
+    // A symlink inside the workspace pointing at `~/.ssh/id_rsa` (or any system
+    // path) passes the lexical check — the relative segment is just a filename
+    // — and `spawn_reveal` then calls `open -R` against the symlink, which
+    // follows it and reveals the real target. `resolve_existing_inside_workspace`
+    // canonicalizes both ends and rejects when the canonical target sits
+    // outside the canonical workspace root. The existence guard moves into the
+    // resolver too — `fs::canonicalize` fails on missing paths and the resolver
+    // surfaces that as "File not found".
+    let target = resolve_existing_inside_workspace(&workspace_root, path.trim())?;
     spawn_reveal(&target)?;
     Ok(SystemOpenResult { success: true })
 }
@@ -88,10 +94,10 @@ pub async fn cmd_workspace_open_with_default(
     path: String,
 ) -> Result<SystemOpenResult, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
-    let target = resolve_inside_workspace(&workspace_root, path.trim())?;
-    if !target.exists() {
-        return Err("File not found".to_string());
-    }
+    // Same hardening as cmd_workspace_open_in_finder above — symlink inside
+    // workspace pointing at a credential file would otherwise be opened by
+    // the OS default app. resolve_existing_inside_workspace blocks the escape.
+    let target = resolve_existing_inside_workspace(&workspace_root, path.trim())?;
     spawn_default_open(&target)?;
     Ok(SystemOpenResult { success: true })
 }
@@ -854,5 +860,80 @@ mod tests {
         let res = validate_external_open_path(lure.to_string_lossy().as_ref(), None);
         assert!(res.is_err(), "symlink to /etc must be rejected, got {:?}", res);
         let _ = std::fs::remove_file(&lure);
+    }
+
+    // ── workspace-relative open: cmd_workspace_open_in_finder /
+    // cmd_workspace_open_with_default ──
+    //
+    // Regression for codex adversarial review (2026-05-07): the workspace-
+    // relative open commands previously used lexical `resolve_inside_workspace`,
+    // which doesn't follow symlinks during validation but `spawn_reveal` /
+    // `spawn_default_open` then ask the OS to open the path — the OS follows
+    // the symlink. So a malicious or even just careless `leak → ~/.ssh/id_rsa`
+    // symlink committed to a repo would leak the credential.
+    //
+    // We don't invoke the public `cmd_*` async functions directly because
+    // they call `spawn_reveal` (which actually launches `open`), but we DO
+    // exercise the underlying resolver — that's the gate that has to
+    // reject the lure before any spawn happens.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_open_blocks_symlink_to_credential() {
+        use std::os::unix::fs::symlink;
+        use crate::workspace_files::path_safety::resolve_existing_inside_workspace;
+
+        let target = "/etc/hosts";
+        if !std::path::Path::new(target).exists() {
+            return;
+        }
+        // Build a workspace under home (NOT /tmp — on macOS that's
+        // /var/folders/... which trips the `/var` system blacklist before
+        // we even get to canonicalize-and-prefix-check).
+        let Some(home) = home_dir() else { return };
+        let ws_root = home.join(format!(".myagents-test-ws-sym-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws_root);
+        std::fs::create_dir_all(&ws_root).unwrap();
+        let lure = ws_root.join("leak");
+        symlink(target, &lure).unwrap();
+
+        let res = resolve_existing_inside_workspace(&ws_root, "leak");
+        let _ = std::fs::remove_dir_all(&ws_root);
+
+        assert!(
+            res.is_err(),
+            "symlink-out-of-workspace must be rejected by workspace open path, got Ok({:?})",
+            res
+        );
+        // Be specific about the failure mode so a future refactor that
+        // accidentally short-circuits to "File not found" or similar still
+        // catches the security regression.
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("escapes workspace") || err.contains("escape"),
+            "unexpected error message: {}",
+            err
+        );
+    }
+
+    // Counterpoint: a legitimate symlink that points back inside the
+    // workspace (e.g. `latest -> versions/v1`) MUST still resolve.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_open_allows_inside_workspace_symlink() {
+        use std::os::unix::fs::symlink;
+        use crate::workspace_files::path_safety::resolve_existing_inside_workspace;
+
+        let Some(home) = home_dir() else { return };
+        let ws_root = home.join(format!(".myagents-test-ws-sym-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws_root);
+        std::fs::create_dir_all(ws_root.join("versions/v1")).unwrap();
+        std::fs::write(ws_root.join("versions/v1/file.txt"), "hi").unwrap();
+        symlink(ws_root.join("versions/v1"), ws_root.join("latest")).unwrap();
+
+        let res = resolve_existing_inside_workspace(&ws_root, "latest/file.txt");
+        let cleanup = std::fs::remove_dir_all(&ws_root);
+
+        assert!(res.is_ok(), "in-workspace symlink must resolve, got {:?}", res);
+        let _ = cleanup;
     }
 }
