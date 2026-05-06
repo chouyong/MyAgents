@@ -233,7 +233,7 @@ fn validate_external_open_path(
 
     // Prefix-check against canonicalized roots so a symlink chain can't
     // escape into /etc via a tmp/home/workspace-shaped lure.
-    let Some(TrustedPrefixMatch { in_home, in_tmp, in_workspace: _ }) = match_trusted_prefix(
+    let Some(TrustedPrefixMatch { in_home, in_tmp, in_workspace }) = match_trusted_prefix(
         &canonical,
         &canonical_home,
         &canonical_tmp,
@@ -278,7 +278,7 @@ fn validate_external_open_path(
     // trusted by the existing rules, and tmp on macOS lives under
     // `/private/var/folders/...` which would otherwise trip the
     // canonicalized `/var` entry.
-    if !in_home && !in_tmp && canonical_starts_with_canonical_blacklist(&canonical) {
+    if in_workspace && !in_home && !in_tmp && canonical_starts_with_canonical_blacklist(&canonical) {
         return Err("Path not allowed".to_string());
     }
     Ok(canonical)
