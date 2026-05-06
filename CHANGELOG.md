@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.2.9] - 2026-05-05
+## [0.2.10] - 2026-05-07
+
+### Fixed
+
+- **1M 模型真正用上 1M 上下文窗口**：之前只要走非 Anthropic 协议的 ≥1M 模型（DeepSeek V4 Pro / Gemini 2.5 / GPT-5.4 / Claude 1M ……），SDK 内部都按 200K 默认窗口算 —— `/context` 显 200K，auto-compact 在 ~187K 就触发，附件按 200K 截。现在在送给 SDK 的 model 字段上拼 `[1m]` 后缀触发 SDK 1M 路径；上游 API 看不到该后缀（SDK 自己 strip）。覆盖主 query / sub-agent / runtime setModel / one-shot spawns / sonnet/opus/haiku alias env 全部 6 个 SDK 注入点。
+- **API 重试期间停止按钮可用**：上游 Anthropic API 抖动时 SDK 会做指数退避重试（最多 ~5 分钟），过去用户只能干等 —— 停止按钮被强制 disable。现在重试期间显示红色 Stop 按钮（"停止重试"），中止走标准 abort 路径，干净退出，不留脏 SDK 状态。
+- **切供应商后立即发消息不会被静默 abort**：deferred-restart 的 reason 在 fresh subprocess spawn 时没清空，导致 ~500ms 后 pre-warm timer 误把刚起好的 subprocess abort 掉，前端静默回 idle。fresh-spawn 入口现在主动 drain pending reasons + cancel orphaned timer。
+- **Tab 切换 / 发送消息后真正滚到最底**：`scrollToBottom()` 漏传 Virtuoso 的 `align: 'end'`，之前会停在最后一条消息的顶部（流式回复多 tool 调用时尤其明显）。同时修复 tab inactive↔active 切换时 follow 模式被 Virtuoso ResizeObserver 在 hidden 期发的 stale 回调污染：现在 inactive 时快照 follow 状态，re-active 时强制恢复，不依赖 live ref。
+- **Widget 标签提及不破坏 Markdown 渲染**：消息谈论 `<generative-ui-widget>` 协议时（inline code、prose 中段提及、一条消息含两个 widget）原解析器会把后续内容当成"未闭合 widget"全部吞掉。重写 pre-Markdown 提取器：line-anchored open 检测、bounded close 搜索、走动 mask window。
+- **Windows 非系统盘 / 项目级 skill 路径打开**：v0.2.8 给 #125 加的 `cmd_open_path_*` 信任前缀只看 home / tmp，工作区在 `D:\` 或外接卷上的所有"打开"操作都报 "Path not allowed"。现在两个 cmd 接受 workspace 参数作为第三个信任前缀；同时拒绝 filesystem-root（`/`、`C:\`、`\\?\C:\`、UNC root）防 prefix-tautology 旁路、对 workspace-only 命中追加 canonicalized blacklist 复查防 macOS `/etc → /private/etc` symlink 旁路。25 个 Rust 测试。
+
+### Security
+
+- **Widget Bash auto-allow regex 拒绝换行**：`myagents widget …` 命令的自动放行 regex 用了 `\s`，JS 里 `\s` 包括 `\n`，导致 `myagents widget readme\nrm` 之类的"两行命令"能命中正则被自动放行（shell 当两行执行）。改成 `[ \t]`，禁掉所有线终结符；20-case 对抗表全部通过。
+
+### Changed
+
+- **Generative-UI 走 CLI 统一双 runtime**：删 `widget_read_me` builtin MCP，builtin SDK + 三个外部 runtime（Claude Code / Codex / Gemini）都通过 `myagents widget readme <module>` CLI 加载设计契约。新增 `buildWidgetSection()` 在 desktop 场景下注入 widget 引导（content-based trigger："你的解释画图比文字更清楚就画图"），共享 `WIDGET_TRIGGER_GUIDANCE` 常量保证系统 prompt 与 README 不漂移。Builtin MCP 数量从 6 降为 5。
+
+
 
 ### Added
 
