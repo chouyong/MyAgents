@@ -1832,20 +1832,23 @@ function schedulePreWarm(): void {
       schedulePreWarm();
       return;
     }
-    // No active session to restart — clear any leftover reasons (e.g. reason was
-    // scheduled during a failed startup and the session never came up).
-    drainDeferredRestart();
 
     if (isSessionActive()) {
-      // Session still cleaning up — RETRY instead of calling startStreamingSession().
-      // We must NOT call startStreamingSession() here because it would await
-      // sessionTerminationPromise and become a "stale awaiter" — waking up minutes later
-      // when the promise resolves for a completely different reason (rewind, provider change),
-      // starting an unwanted session with stale config and corrupting shared state.
-      // Retry ensures we only start when the session is truly idle.
+      // Session still cleaning up OR a fresh `startStreamingSession()` is mid-spawn
+      // (`isProcessing=true` but `querySession` not yet assigned). RETRY instead of
+      // calling startStreamingSession() — that would become a "stale awaiter" on
+      // sessionTerminationPromise and wake later for an unrelated reason. Don't drain
+      // pendingConfigRestart here either: a setter that ran during the spawn window
+      // (e.g. `setSessionProviderEnv` at the `isProcessing && !querySession` branch)
+      // may have legitimately latched a reason that needs to apply against the
+      // spawning subprocess once `querySession` is set on the next timer fire.
       schedulePreWarm();
       return;
     }
+    // Truly idle — no session and not spawning. Clear any leftover reasons (e.g.
+    // scheduled during a failed startup where the session never came up) so the
+    // fresh pre-warm doesn't carry stale ghosts.
+    drainDeferredRestart();
     console.log('[agent] pre-warming SDK subprocess + MCP servers');
     startStreamingSession(true).catch((error) => {
       console.error('[agent] pre-warm failed:', error);
@@ -6402,6 +6405,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
   if (isProcessing || querySession) {
     return;
+  }
+
+  // The fresh subprocess about to spawn reads the latest currentModel /
+  // currentMcpServers / currentAgentDefinitions / currentProviderEnv via
+  // `buildClaudeSessionEnv()` + `buildSdkMcpServers()` below — every entry in
+  // `pendingConfigRestart` is satisfied at spawn by definition. Drain the latch
+  // (and cancel any orphaned preWarmTimer scheduled by a predecessor's finally
+  // block) so a stale timer firing ~500ms later doesn't apply a "batched config
+  // restart" against *this* freshly-configured subprocess and silently kill an
+  // in-flight direct user message. Mirrors `forceRestartActiveSessionForMcp`
+  // (search "we drive restart"): when *this* call is the legitimate restart,
+  // any latched reason is by construction redundant. Reasons added AFTER this
+  // point (e.g. config edits during spawn / first turn) latch normally and
+  // drain at the next pre-warm timer or turn-complete handler.
+  if (hasDeferredRestart()) {
+    const reasons = drainDeferredRestart();
+    console.log(`[agent] ${preWarm ? 'pre-warm' : 'start'} session: dropping satisfied deferred reasons (${reasons})`);
+  }
+  if (preWarmTimer) {
+    clearTimeout(preWarmTimer);
+    preWarmTimer = null;
   }
 
   isPreWarming = preWarm;
