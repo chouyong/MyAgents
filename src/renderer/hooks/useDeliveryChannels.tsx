@@ -6,7 +6,9 @@ import { useAgentStatuses } from './useAgentStatuses';
 import { useConfig } from './useConfig';
 import type { SelectOption } from '@/components/CustomSelect';
 import type { CronDelivery } from '@/types/cronTask';
+import type { ChannelConfig } from '../../shared/types/agent';
 import { getChannelTypeLabel } from '@/utils/taskCenterUtils';
+import { resolveChannelDisplayName } from '@/utils/channelDisplayName';
 
 /** Sentinel value: Rust deliver_cron_result_to_bot uses the bot's router to auto-determine chat target */
 const AUTO_CHAT_ID = '_auto_';
@@ -21,16 +23,27 @@ export interface DeliveryChannelInfo {
 }
 
 /**
- * Derive the best display name for a channel bot.
- * Priority: botUsername (runtime) > name (config, skip npm specs) > platform label + " Bot"
+ * Derive the best display name for a channel bot, joining runtime status with
+ * config (so we have access to `openclawNpmSpec` for precise dirty-name detection).
+ *
+ * Priority — see resolveChannelDisplayName: botUsername (runtime) > clean
+ * channel.name (config) > platform label.
+ *
+ * Falls back to a status-only shape when config is unavailable (rare race
+ * window where status arrived before config). isDirtyChannelName returns
+ * false for entries lacking openclawNpmSpec, so we don't mistakenly suppress
+ * a legitimate name in that case.
  */
-function deriveBotDisplayName(ch: { name?: string; botUsername?: string; channelType: string }): string {
-  // 1. Runtime bot name from verify_connection() — most accurate (skip npm specs)
-  if (ch.botUsername && !ch.botUsername.includes('/')) return ch.botUsername;
-  // 2. Config name, but skip npm package specs (contain "/")
-  if (ch.name && !ch.name.includes('/')) return ch.name;
-  // 3. Fallback: platform label
-  return getChannelTypeLabel(ch.channelType) + ' Bot';
+function deriveBotDisplayName(
+  status: { channelId: string; name?: string; botUsername?: string; channelType: string },
+  channelCfg: ChannelConfig | undefined,
+): string {
+  const platformLabel = getChannelTypeLabel(status.channelType);
+  const channel = channelCfg ?? { type: status.channelType, name: status.name };
+  // Append " Bot" suffix when no real name was found (matches prior behaviour
+  // for the Cron delivery picker — distinguishes bot label from group/agent labels).
+  const resolved = resolveChannelDisplayName(channel, status, platformLabel);
+  return resolved === platformLabel ? `${platformLabel} Bot` : resolved;
 }
 
 /**
@@ -50,6 +63,14 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
     const result: SelectOption[] = [
       { value: '', label: '桌面通知（默认）' },
     ];
+
+    // Build channelId → ChannelConfig map across all agents. Lets the display-name
+    // resolver compare runtime botUsername against `openclawNpmSpec`-derived dirty
+    // values (a join the runtime status alone can't perform — it has no npmSpec).
+    const channelById = new Map<string, ChannelConfig>();
+    for (const a of agents) {
+      for (const ch of a.channels ?? []) channelById.set(ch.id, ch);
+    }
 
     // Build agentId → Project display name mapping (matches Agent card list logic)
     const agentDisplayNames = new Map<string, string>();
@@ -88,7 +109,7 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
 
       const channelOptions: SelectOption[] = [];
       for (const ch of sortedChannels) {
-        const botName = deriveBotDisplayName(ch);
+        const botName = deriveBotDisplayName(ch, channelById.get(ch.channelId));
         const platformTag = getChannelTypeLabel(ch.channelType);
         const statusText = ch.status === 'online' ? '在线' : ch.status === 'connecting' ? '连接中' : ch.status === 'error' ? '异常' : '离线';
         const statusColor = ch.status === 'online' ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]';

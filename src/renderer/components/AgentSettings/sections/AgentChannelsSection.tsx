@@ -15,6 +15,7 @@ import telegramIcon from '../../ImSettings/assets/telegram.png';
 import feishuIcon from '../../ImSettings/assets/feishu.jpeg';
 import dingtalkIcon from '../../ImSettings/assets/dingtalk.svg';
 import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
+import { resolveChannelDisplayName } from '@/utils/channelDisplayName';
 
 interface AgentChannelsSectionProps {
   agent: AgentConfig;
@@ -185,9 +186,11 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
             const isRunning = chStatus?.status === 'online' || chStatus?.status === 'connecting';
             const isLoading = loading === channel.id;
 
-            const displayName = chStatus?.botUsername
-              ? (channel.type === 'telegram' ? `@${chStatus.botUsername}` : chStatus.botUsername)
-              : (channel.name || getPlatformLabel(channel.type));
+            const displayName = resolveChannelDisplayName(
+              channel,
+              chStatus,
+              getPlatformLabel(channel.type),
+            );
 
             return (
               <div

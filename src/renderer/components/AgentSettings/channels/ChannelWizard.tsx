@@ -9,6 +9,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
+import { isDirtyChannelName } from '@/utils/channelDisplayName';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
 import DingtalkCredentialInput from '../../ImSettings/components/DingtalkCredentialInput';
@@ -487,7 +488,16 @@ export default function ChannelWizard({
             }
             // Merge promoted plugin defaults (e.g. dmPolicy: 'open') under user values
             const mergedConfig = { ...(promoted?.defaultConfig ?? {}), ...pluginConfig };
-            const pluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin Bot';
+            // Filter out manifest.name when it's actually the npm package id —
+            // historically that's how "wecom/wecom-openclaw-plugin" got persisted
+            // into channel.name and surfaced in the list. The same dirty-name
+            // helper used at render time is reused here for write-side consistency.
+            const manifestName = installedPlugin?.manifest?.name;
+            const cleanManifestName = manifestName && !isDirtyChannelName({
+                name: manifestName,
+                openclawNpmSpec: installedPlugin?.npmSpec,
+            }) ? manifestName : null;
+            const pluginName = promoted?.name || cleanManifestName || openclawPluginId || 'Plugin Bot';
             // Enable all non-sensitive tool groups by default.
             // Sensitive groups (im, perm) are opt-in. Rust auto-merges new plugin groups at startup.
             const allToolGroups = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common'];
@@ -849,7 +859,14 @@ export default function ChannelWizard({
         }
     }, []);
 
-    const openclawPluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin';
+    // Mirror the buildChannelConfig logic — filter manifest.name when it equals
+    // the npm package id, otherwise the wizard header would display
+    // "wecom/wecom-openclaw-plugin" before promoted.name resolves.
+    const openclawWizardManifestName = installedPlugin?.manifest?.name && !isDirtyChannelName({
+        name: installedPlugin.manifest.name,
+        openclawNpmSpec: installedPlugin?.npmSpec,
+    }) ? installedPlugin.manifest.name : null;
+    const openclawPluginName = promoted?.name || openclawWizardManifestName || openclawPluginId || 'Plugin';
     const platformLabel = isOpenClaw ? openclawPluginName : isDingtalk ? '钉钉' : isFeishu ? '飞书' : 'Telegram';
 
     // Platform icon for header
@@ -1458,11 +1475,10 @@ export default function ChannelWizard({
                                     >
                                         飞书开放平台
                                     </a>并创建自建应用</li>
-                                    <li>2. 在「凭证与基础信息」页获取 App ID 和 App Secret</li>
-                                    <li>3. 左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span>，找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击 <span className="font-medium text-[var(--ink)]">配置</span> 按钮添加</li>
+                                    <li>2. 在「凭证与基础信息」页获取 App ID 和 App Secret 填入上方</li>
+                                    <li>3. 填入凭证后点击「下一步」，会引导你完成权限、事件订阅、添加机器人能力等设置</li>
                                 </ol>
                                 <img src={feishuStep1Img} alt="飞书开放平台 - 凭证与基础信息" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
-                                <img src={feishuStep2AddBotImg} alt="飞书添加应用能力 - 机器人" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </div>
                     ) : (
@@ -1554,6 +1570,17 @@ export default function ChannelWizard({
                         nextIcon: <ArrowRight className="h-4 w-4" />,
                     })}
 
+                    {/* Status strip: credential verified, what's next */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] px-4 py-3">
+                        <div className="flex items-center gap-2 text-sm text-[var(--ink)]">
+                            <Check className="h-4 w-4 text-[var(--success)]" />
+                            <span>凭证已验证{botUsername ? `：${botUsername}` : ''}</span>
+                        </div>
+                        <p className="mt-1.5 pl-6 text-xs text-[var(--ink-muted)]">
+                            按照下面 3 步在飞书开放平台完成权限、事件订阅、版本发布，然后点上方「下一步」继续绑定。
+                        </p>
+                    </div>
+
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                         <h3 className="text-sm font-medium text-[var(--ink)]">4. 配置权限</h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
@@ -1610,6 +1637,19 @@ export default function ChannelWizard({
                         nextLoading: starting,
                         nextIcon: !starting ? <Check className="h-4 w-4" /> : undefined,
                     })}
+
+                    {/* Status strip (lark): show credentials + what's next */}
+                    {promoted?.pluginId === 'openclaw-lark' && (
+                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] px-4 py-3">
+                            <div className="flex items-center gap-2 text-sm text-[var(--ink)]">
+                                <Check className="h-4 w-4 text-[var(--success)]" />
+                                <span>已填入 {openclawPluginName} 凭证</span>
+                            </div>
+                            <p className="mt-1.5 pl-6 text-xs text-[var(--ink-muted)]">
+                                按照下面 3 步在飞书开放平台完成权限、事件订阅、添加机器人能力，全部完成后点上方「启动 Channel」验证并启动。
+                            </p>
+                        </div>
+                    )}
 
                     {/* Feishu-specific: Permissions + Events + Publish guide (reuse built-in feishu setup) */}
                     {promoted?.pluginId === 'openclaw-lark' && (
@@ -1669,41 +1709,44 @@ export default function ChannelWizard({
                         </>
                     )}
 
-                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">确认配置</h3>
-                        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                            确认以上设置完成后，点击「启动 Channel」
-                        </p>
+                    {/* Confirm panel (non-lark): lark uses the top status strip instead */}
+                    {promoted?.pluginId !== 'openclaw-lark' && (
+                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                            <h3 className="text-sm font-medium text-[var(--ink)]">确认配置</h3>
+                            <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                                确认以上设置完成后，点击「启动 Channel」
+                            </p>
 
-                        <div className="mt-4 space-y-3">
-                            <div className="flex items-center gap-3 rounded-lg border border-[var(--line)] p-3">
-                                {promoted ? (
-                                    <img src={promoted.icon} alt={openclawPluginName} className="h-8 w-8 shrink-0 rounded-lg" />
-                                ) : (
-                                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)]">
-                                        <Puzzle className="h-4 w-4 text-[var(--accent-warm)]" />
-                                    </div>
-                                )}
-                                <div>
-                                    <p className="text-sm font-medium text-[var(--ink)]">{openclawPluginName}</p>
-                                    {installedPlugin?.packageVersion && (
-                                        <p className="text-xs text-[var(--ink-muted)]">v{installedPlugin.packageVersion}</p>
+                            <div className="mt-4 space-y-3">
+                                <div className="flex items-center gap-3 rounded-lg border border-[var(--line)] p-3">
+                                    {promoted ? (
+                                        <img src={promoted.icon} alt={openclawPluginName} className="h-8 w-8 shrink-0 rounded-lg" />
+                                    ) : (
+                                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)]">
+                                            <Puzzle className="h-4 w-4 text-[var(--accent-warm)]" />
+                                        </div>
                                     )}
-                                </div>
-                            </div>
-
-                            {(() => {
-                                const cfg = buildOpenclawConfig();
-                                const count = Object.keys(cfg).length;
-                                return count > 0 ? (
-                                    <div className="flex items-center justify-between rounded-lg border border-[var(--line)] p-3">
-                                        <span className="text-xs text-[var(--ink-muted)]">配置项</span>
-                                        <span className="text-sm text-[var(--ink)]">{count} 个</span>
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{openclawPluginName}</p>
+                                        {installedPlugin?.packageVersion && (
+                                            <p className="text-xs text-[var(--ink-muted)]">v{installedPlugin.packageVersion}</p>
+                                        )}
                                     </div>
-                                ) : null;
-                            })()}
+                                </div>
+
+                                {(() => {
+                                    const cfg = buildOpenclawConfig();
+                                    const count = Object.keys(cfg).length;
+                                    return count > 0 ? (
+                                        <div className="flex items-center justify-between rounded-lg border border-[var(--line)] p-3">
+                                            <span className="text-xs text-[var(--ink-muted)]">配置项</span>
+                                            <span className="text-sm text-[var(--ink)]">{count} 个</span>
+                                        </div>
+                                    ) : null;
+                                })()}
+                            </div>
                         </div>
-                    </div>
+                    )}
                 </div>
             )}
 

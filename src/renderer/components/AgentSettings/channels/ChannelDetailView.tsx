@@ -27,6 +27,7 @@ import BindCodePanel from '../../ImSettings/components/BindCodePanel';
 import AiConfigCard from '../../ImSettings/components/AiConfigCard';
 import DingtalkCardConfig from '../../ImSettings/components/DingtalkCardConfig';
 import GroupPermissionList from '../../ImSettings/components/GroupPermissionList';
+import { resolveChannelDisplayName, isDirtyDisplayName } from '@/utils/channelDisplayName';
 import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../../shared/types/agent';
 import type { GroupActivation } from '../../../../shared/types/im';
 import type { ChannelStatusData } from '@/hooks/useAgentStatuses';
@@ -244,24 +245,32 @@ export default function ChannelDetailView({
                 if (isMountedRef.current && !togglingRef.current) {
                     setBotStatus(status);
                     if (status?.botUsername) {
-                        setBotUsername(status.botUsername);
-                        setVerifyStatus('valid');
-                        // Auto-sync channel name from platform username (once)
-                        if (!nameSyncedRef.current && !togglingRef.current) {
-                            nameSyncedRef.current = true;
-                            const ch = channelRef.current;
-                            const displayName = ch?.type === 'telegram'
-                                ? `@${status.botUsername}`
-                                : status.botUsername;
-                            if (ch?.name !== displayName) {
-                                const updatedChannels = (agent.channels ?? []).map(c =>
-                                    c.id === channelId ? { ...c, name: displayName } : c,
-                                );
-                                patchAgentConfig(agent.id, { channels: updatedChannels })
-                                    .then(() => { if (isMountedRef.current) onChanged(); })
-                                    .catch(err => {
-                                        console.error('[ChannelDetail] Failed to sync channel name:', err);
-                                    });
+                        const ch = channelRef.current;
+                        // Skip dirty botUsername values (historical npm-spec dirt loaded
+                        // from im_<botId>/state.json). Without this guard, auto-sync
+                        // would persist dirt back into channel.name on disk — pre-v0.2.10
+                        // bridges wrote pluginName ("wecom/wecom-openclaw-plugin") to
+                        // bot_username, and HealthManager re-loads that on restart.
+                        const dirty = isDirtyDisplayName(status.botUsername, ch?.openclawNpmSpec);
+                        if (!dirty) {
+                            setBotUsername(status.botUsername);
+                            setVerifyStatus('valid');
+                            // Auto-sync channel name from platform username (once)
+                            if (!nameSyncedRef.current && !togglingRef.current) {
+                                nameSyncedRef.current = true;
+                                const displayName = ch?.type === 'telegram'
+                                    ? `@${status.botUsername}`
+                                    : status.botUsername;
+                                if (ch?.name !== displayName) {
+                                    const updatedChannels = (agent.channels ?? []).map(c =>
+                                        c.id === channelId ? { ...c, name: displayName } : c,
+                                    );
+                                    patchAgentConfig(agent.id, { channels: updatedChannels })
+                                        .then(() => { if (isMountedRef.current) onChanged(); })
+                                        .catch(err => {
+                                            console.error('[ChannelDetail] Failed to sync channel name:', err);
+                                        });
+                                }
                             }
                         }
                     }
@@ -655,7 +664,7 @@ export default function ChannelDetailView({
                     <div>
                         <div className="flex items-center gap-2">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">
-                                {channel.name || platformLabel}
+                                {resolveChannelDisplayName(channel, botStatus, platformLabel)}
                             </h2>
                             <div className="flex items-center gap-1.5">
                                 <div className="h-1.5 w-1.5 rounded-full" style={{ background: statusColor }} />

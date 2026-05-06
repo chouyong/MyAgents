@@ -10,9 +10,6 @@ import qqbotStep1Img from './assets/qqbot_step1_index.png';
 import qqbotStep2Img from './assets/qqbot_step2_credentials.png';
 import feishuIcon from './assets/feishu.jpeg';
 import feishuStep1Img from './assets/feishu_step1.png';
-import feishuStep2EventsImg from './assets/feishu_step2_events.png';
-import feishuStep2PermissionsImg from './assets/feishu_step2_permissions.png';
-import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
 import weixinIcon from './assets/weixin.png';
 import wecomIcon from './assets/wecom.jpeg';
 
@@ -97,25 +94,10 @@ export const PROMOTED_PLUGINS: PromotedPlugin[] = [
             steps: [
                 {
                     image: feishuStep1Img,
-                    alt: '飞书开放平台 — 创建自建应用',
-                    caption: '1. 前往飞书开放平台，创建企业自建应用',
+                    alt: '飞书开放平台 — 凭证与基础信息',
+                    caption: '在飞书开放平台创建自建应用，「凭证与基础信息」页可看到 App ID 和 App Secret',
                     captionLinkText: '飞书开放平台',
                     captionLinkUrl: 'https://open.feishu.cn/app',
-                },
-                {
-                    image: feishuStep2EventsImg,
-                    alt: '飞书应用 — 配置事件订阅',
-                    caption: '2. 在「事件订阅」中启用所需事件',
-                },
-                {
-                    image: feishuStep2PermissionsImg,
-                    alt: '飞书应用 — 配置权限',
-                    caption: '3. 在「权限管理」中开通所需权限',
-                },
-                {
-                    image: feishuStep2AddBotImg,
-                    alt: '飞书应用 — 添加机器人能力',
-                    caption: '4. 在「应用能力」中添加「机器人」能力',
                 },
             ],
         },

@@ -259,6 +259,51 @@ impl BridgeAdapter {
     pub fn get_commands(&self) -> &[(String, String)] {
         &self.commands
     }
+
+    /// Fetch bot display name from bridge's `/identity` endpoint.
+    ///
+    /// 10s timeout — bridge pre-warms the resolver after `gatewayStarted`,
+    /// so cache is usually ready by the time verify_connection polls. Cold
+    /// path: lark/qq resolvers do token + info fetches at 3s each (≤6s),
+    /// well under the 10s ceiling. Beyond that we give up and return None;
+    /// next channel restart will re-resolve.
+    async fn fetch_display_name(&self) -> Option<String> {
+        let resp = match self.client
+            .get(self.url("/identity"))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                ulog_warn!("[bridge:{}] /identity request failed: {} — display name will be unset", self.plugin_id, e);
+                return None;
+            }
+        };
+        if !resp.status().is_success() {
+            ulog_warn!("[bridge:{}] /identity returned HTTP {} — display name will be unset", self.plugin_id, resp.status());
+            return None;
+        }
+        let body: serde_json::Value = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                ulog_warn!("[bridge:{}] /identity JSON parse failed: {}", self.plugin_id, e);
+                return None;
+            }
+        };
+        let name = body["displayName"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        if name.is_none() {
+            // displayName: null is the expected response for plugins without a
+            // resolver (wecom / weixin) — log at debug, not warn, to avoid
+            // noise on every channel start.
+            ulog_debug!("[bridge:{}] /identity returned null displayName (no resolver / resolution failed)", self.plugin_id);
+        }
+        name
+    }
 }
 
 impl ImAdapter for BridgeAdapter {
@@ -286,10 +331,14 @@ impl ImAdapter for BridgeAdapter {
             }
 
             if body["ready"].as_bool() == Some(true) {
-                let name = body["pluginName"].as_str()
-                    .unwrap_or(&self.plugin_id)
-                    .to_string();
-                return Ok(name);
+                // Don't fall back to pluginName (= npm package name) — that's
+                // the bug we're fixing in v0.2.10 (it surfaced as the bot's
+                // display name in the channel list, e.g. "wecom/wecom-openclaw-plugin").
+                // Pull display name from /identity (resolver-cached on bridge side).
+                // Empty / missing means "no display name available" — caller MUST
+                // write None to bot_username so any historical dirty value is cleared.
+                let display_name = self.fetch_display_name().await.unwrap_or_default();
+                return Ok(display_name);
             }
 
             // Plugin not ready yet — wait and retry

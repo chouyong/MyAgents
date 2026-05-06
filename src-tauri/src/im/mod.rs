@@ -1050,12 +1050,21 @@ async fn create_bot_instance<R: Runtime>(
     use adapter::ImStreamAdapter;
     match adapter.verify_connection().await {
         Ok(display_name) => {
-            ulog_info!("[im] Bot verified: {}", display_name);
-            // Store bot display name. Telegram returns "@username", Feishu returns plain name.
-            let username = display_name.strip_prefix('@')
-                .map(|s| s.to_string())
-                .unwrap_or(display_name);
-            health.set_bot_username(Some(username)).await;
+            // Map "" → None so any historical dirty bot_username (e.g.
+            // "wecom/wecom-openclaw-plugin" written by old BridgeAdapter
+            // versions, then loaded back from im_<botId>_state.json on
+            // restart) gets explicitly cleared. Renderer falls back to
+            // platform label when bot_username is None.
+            //
+            // Non-empty: Telegram returns "@username" (strip @), Feishu /
+            // OpenClaw bridge resolvers return plain name (no prefix).
+            let username = if display_name.is_empty() {
+                None
+            } else {
+                Some(display_name.strip_prefix('@').map(String::from).unwrap_or(display_name))
+            };
+            ulog_info!("[im] Bot verified: {}", username.as_deref().unwrap_or("<no display name>"));
+            health.set_bot_username(username).await;
             health.set_status(ImStatus::Online).await;
             health.set_error(None).await;
             // Emit appropriate event based on whether this is an agent channel or legacy bot
@@ -1073,6 +1082,14 @@ async fn create_bot_instance<R: Runtime>(
                 bp.kill_sync();
                 bridge::unregister_bridge_sender(&bot_id).await;
             }
+            // Also clear bot_username on the error path. Otherwise a historical
+            // dirty value (pre-v0.2.10 bridge wrote `pluginName` like
+            // "wecom/wecom-openclaw-plugin" here) loaded from disk would
+            // survive verify failures and continue rendering in the channel
+            // list. v0.2.10 invariant: bot_username is the source of truth
+            // ONLY when verify_connection succeeds; on any failure it MUST be
+            // None so the renderer falls back to platform label.
+            health.set_bot_username(None).await;
             health.set_status(ImStatus::Error).await;
             health.set_error(Some(err_msg.clone())).await;
             let _ = health.persist().await;

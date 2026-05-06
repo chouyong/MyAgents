@@ -16,6 +16,7 @@
 
 import { createCompatApi, type CapturedPlugin, type CapturedTool } from './compat-api';
 import { createCompatRuntime } from './compat-runtime';
+import { getBotIdentity, abortResolver } from './bot-identity';
 import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
@@ -588,6 +589,11 @@ async function loadPlugin() {
 
     // Don't await — let the gateway run in background (it may be long-lived)
     gatewayStarted = true;
+    // Pre-warm bot identity resolver — fire-and-forget, populates cache so
+    // verify_connection's GET /identity hits the cache instead of waiting on
+    // a cold token+info round-trip. Returns null for plugins without a
+    // resolver (wecom / weixin) → renderer falls back to platformLabel.
+    void getBotIdentity(capturedPlugin.id, pluginConfig);
     // Store context for stopAccount() — OpenClaw expects same context shape
     (globalThis as Record<string, unknown>).__bridgeGatewayCtx = ctx;
     (startAccount as (ctx: Record<string, unknown>) => Promise<void>)(ctx)
@@ -603,6 +609,8 @@ async function loadPlugin() {
   } else {
     // No gateway — plugin is a send-only channel, mark as ready immediately
     gatewayStarted = true;
+    // Pre-warm bot identity resolver (same rationale as above).
+    void getBotIdentity(capturedPlugin.id, pluginConfig);
   }
 }
 
@@ -624,6 +632,18 @@ const server = honoServe({
     //                         actually serving" (watchdog should restart).
     if (path === '/health' || path === '/health/live') {
       return Response.json({ ok: true, pluginName });
+    }
+
+    // Bot identity: returns the bot's user-facing display name resolved by
+    // bot-identity.ts. Returns { displayName: null } when no resolver matches
+    // the plugin (wecom / weixin) or when resolution failed — caller should
+    // treat null as "no identity available" and fall back to platform label.
+    if (path === '/identity') {
+      if (!capturedPlugin) {
+        return Response.json({ displayName: null });
+      }
+      const identity = await getBotIdentity(capturedPlugin.id, pluginConfig);
+      return Response.json({ displayName: identity?.displayName ?? null });
     }
 
     if (path === '/health/ready') {
@@ -1207,6 +1227,11 @@ const server = honoServe({
           };
           gatewayError = null;
           gatewayStarted = true;
+          // Pre-warm bot identity after QR-login restart — pluginConfig may have
+          // been mutated (e.g. accountId persisted). Cache from the pre-QR
+          // attempt is still valid for plugins where identity is config-derived;
+          // for QR-only plugins (weixin) the resolver returns null anyway.
+          void getBotIdentity(capturedPlugin.id, pluginConfig);
           // Store context for stopAccount()
           (globalThis as Record<string, unknown>).__bridgeGatewayCtx = ctx;
           (startAccount as (ctx: Record<string, unknown>) => Promise<void>)(ctx)
@@ -1239,6 +1264,8 @@ const server = honoServe({
       // Abort the gateway via AbortController
       const abortCtrl = (globalThis as Record<string, unknown>).__bridgeAbort as AbortController | undefined;
       if (abortCtrl) abortCtrl.abort();
+      // Abort any in-flight bot-identity resolver fetches.
+      abortResolver();
       // Also try calling stopAccount if available — OpenClaw expects same context as startAccount
       const stopAccount = capturedPlugin?.gateway?.stopAccount;
       if (typeof stopAccount === 'function') {
