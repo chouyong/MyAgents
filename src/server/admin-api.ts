@@ -45,6 +45,7 @@ import { getHomeDirOrNull } from './utils/platform';
 import { join } from 'path';
 import { broadcast } from './sse';
 import { getCronTaskContext, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
+import { getImCronContext, getSessionCronContext } from './tools/im-cron-tool';
 import { getImMediaContext } from './tools/im-media-tool';
 import { buildReadMeContent } from './tools/generative-ui-tool';
 import { WIDGET_TRIGGER_GUIDANCE } from './system-prompt-cli-tools';
@@ -1508,10 +1509,85 @@ export function handleVersion(): AdminResponse {
 
 // ---------------------------------------------------------------------------
 // Cron Task forwarding (Admin API → Management API)
+//
+// Workspace-scoped trust boundary
+// -------------------------------
+// The Rust Management API treats every cron task as global — it has no
+// knowledge of which Sidecar made the call, and `cron/list` without
+// `workspacePath` returns ALL tasks across the system. Before v0.2.11 the
+// `im-cron` MCP enforced a per-bot/per-workspace ownership guard inside its
+// tool handler. Now that cron CRUD flows through `myagents cron …` CLI
+// (auto-approved Bash in IM/cron sessions), the same guard MUST be applied
+// here at the admin-api boundary. Otherwise a prompt-injected IM bot can
+// list and mutate tasks belonging to other workspaces.
+//
+// The guard works in two parts:
+//
+//  1. `defaultCronWorkspace()` — derive the active sidecar's "scope
+//     workspace" from current IM-cron / session-cron context, falling back
+//     to the agentDir. List/create/status calls default to this when the
+//     caller didn't pass `--workspace`, matching the old MCP behaviour.
+//
+//  2. `verifyTaskOwnership(taskId)` — gate mutating ops (update/delete/
+//     run-now/start/stop/runs). Calls Rust `cron/list?workspacePath=<scope>`
+//     and rejects if `taskId` isn't in the returned set. One extra round-trip
+//     per mutation, but Rust is co-resident on loopback so it's <5ms.
+//
+// Renderer-initiated calls (Settings UI / TaskCenter) come in with explicit
+// `workspacePath` and bypass the default; they trust the user, not the AI.
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve the workspace this Sidecar should treat as "current" for cron CRUD.
+ * Used to default `workspacePath` on AI-initiated `myagents cron` invocations
+ * when the AI didn't (or can't) supply one.
+ *
+ * Resolution order — most-specific to least:
+ *   1. IM-cron context (`/api/im/enqueue` sets this for IM bot sessions)
+ *   2. Session-cron context (regular non-IM cron-bearing sessions)
+ *   3. Sidecar `agentDir` (last-resort default — every Sidecar has one)
+ */
+function defaultCronWorkspace(): string {
+  const imCron = getImCronContext();
+  if (imCron?.workspacePath) return imCron.workspacePath;
+  const sessionCron = getSessionCronContext();
+  if (sessionCron?.workspacePath) return sessionCron.workspacePath;
+  return getAgentState().agentDir;
+}
+
+/**
+ * Verify that `taskId` belongs to the current Sidecar's workspace. Returns
+ * `null` on success, an `AdminResponse` rejection otherwise. Replaces the
+ * deleted im-cron MCP `verifyTaskOwnership` helper with the same semantics.
+ *
+ * Performs a `cron/list?workspacePath=<scope>` round-trip and checks
+ * membership. The list endpoint returns up to ~100s of rows; for our scale
+ * this is cheaper than adding a new owner-check Rust endpoint.
+ */
+async function verifyCronTaskOwnership(taskId: string): Promise<AdminResponse | null> {
+  const workspacePath = defaultCronWorkspace();
+  const qs = `?workspacePath=${encodeURIComponent(workspacePath)}`;
+  const resp = await managementApi(`/api/cron/list${qs}`);
+  if (!resp.ok) {
+    return mgmtError(resp, 'Failed to verify task ownership');
+  }
+  const tasks = ((resp as Record<string, unknown>).tasks as Array<{ id?: string }> | undefined) ?? [];
+  const owned = tasks.some(t => t.id === taskId);
+  if (!owned) {
+    return {
+      success: false,
+      error: `Task ${taskId} not found in current workspace. The current session can only manage cron tasks created in its own workspace.`,
+    };
+  }
+  return null;
+}
+
 export async function handleCronList(payload: { workspacePath?: string }): Promise<AdminResponse> {
-  const qs = payload.workspacePath ? `?workspacePath=${encodeURIComponent(payload.workspacePath)}` : '';
+  // Default to current sidecar's workspace if caller didn't specify. Without
+  // this, `myagents cron list` from an IM bot returns tasks across every
+  // workspace on the system — see ownership-guard rationale above.
+  const workspacePath = payload.workspacePath ?? defaultCronWorkspace();
+  const qs = `?workspacePath=${encodeURIComponent(workspacePath)}`;
   const resp = await managementApi(`/api/cron/list${qs}`);
   if (resp.ok) {
     return { success: true, data: (resp as Record<string, unknown>).tasks ?? [] };
@@ -1520,16 +1596,26 @@ export async function handleCronList(payload: { workspacePath?: string }): Promi
 }
 
 export async function handleCronCreate(payload: Record<string, unknown>): Promise<AdminResponse> {
-  const resp = await managementApi('/api/cron/create', 'POST', payload);
+  // Default workspacePath if caller didn't supply one. Rust requires the
+  // field; without this default, every AI-issued `myagents cron add` would
+  // 400 because the prompt examples (intentionally) don't mention --workspace.
+  const finalPayload = (payload.workspacePath || payload.workspace_path)
+    ? payload
+    : { ...payload, workspacePath: defaultCronWorkspace() };
+  const resp = await managementApi('/api/cron/create', 'POST', finalPayload);
   return wrapMgmtResponse(resp);
 }
 
 export async function handleCronStop(payload: { taskId: string }): Promise<AdminResponse> {
+  const reject = await verifyCronTaskOwnership(payload.taskId);
+  if (reject) return reject;
   const resp = await managementApi('/api/cron/stop', 'POST', payload);
   return wrapMgmtResponse(resp);
 }
 
 export async function handleCronStart(payload: { taskId: string }): Promise<AdminResponse> {
+  const reject = await verifyCronTaskOwnership(payload.taskId);
+  if (reject) return reject;
   const resp = await managementApi('/api/cron/run', 'POST', payload);
   return wrapMgmtResponse(resp);
 }
@@ -1538,6 +1624,8 @@ export async function handleCronStart(payload: { taskId: string }): Promise<Admi
 /// Returns { taskId, sessionId, dispatchedAt } on success; { error, code } on
 /// conflict (task currently executing).
 export async function handleCronRunNow(payload: { taskId: string }): Promise<AdminResponse> {
+  const reject = await verifyCronTaskOwnership(payload.taskId);
+  if (reject) return reject;
   const resp = await managementApi('/api/cron/trigger', 'POST', payload);
   if (resp.ok) {
     return {
@@ -1553,11 +1641,15 @@ export async function handleCronRunNow(payload: { taskId: string }): Promise<Adm
 }
 
 export async function handleCronDelete(payload: { taskId: string }): Promise<AdminResponse> {
+  const reject = await verifyCronTaskOwnership(payload.taskId);
+  if (reject) return reject;
   const resp = await managementApi('/api/cron/delete', 'POST', payload);
   return wrapMgmtResponse(resp);
 }
 
 export async function handleCronUpdate(payload: { taskId: string; patch: Record<string, unknown> }): Promise<AdminResponse> {
+  const reject = await verifyCronTaskOwnership(payload.taskId);
+  if (reject) return reject;
   const resp = await managementApi('/api/cron/update', 'POST', payload);
   if (resp.ok) {
     // Issue #115 — surface the post-update task summary so CLI can echo
@@ -1571,6 +1663,8 @@ export async function handleCronUpdate(payload: { taskId: string; patch: Record<
 }
 
 export async function handleCronRuns(payload: { taskId: string; limit?: number }): Promise<AdminResponse> {
+  const reject = await verifyCronTaskOwnership(payload.taskId);
+  if (reject) return reject;
   const qs = `?taskId=${encodeURIComponent(payload.taskId)}${payload.limit ? `&limit=${payload.limit}` : ''}`;
   const resp = await managementApi(`/api/cron/runs${qs}`);
   if (resp.ok) {
@@ -1580,7 +1674,8 @@ export async function handleCronRuns(payload: { taskId: string; limit?: number }
 }
 
 export async function handleCronStatus(payload: { workspacePath?: string }): Promise<AdminResponse> {
-  const qs = payload.workspacePath ? `?workspacePath=${encodeURIComponent(payload.workspacePath)}` : '';
+  const workspacePath = payload.workspacePath ?? defaultCronWorkspace();
+  const qs = `?workspacePath=${encodeURIComponent(workspacePath)}`;
   const resp = await managementApi(`/api/cron/status${qs}`);
   return wrapMgmtResponse(resp);
 }
@@ -1949,6 +2044,59 @@ export function handleCronExit(payload: { reason?: string }): AdminResponse {
   };
 }
 
+/**
+ * `myagents im wake [--text "..."]` — trigger a heartbeat wake on the current
+ * IM bot. Used by AI to nudge itself into the next reasoning cycle when it
+ * needs another turn (e.g., long-running task that just produced new state).
+ *
+ * Only meaningful inside an IM session — there is no "current bot" outside
+ * one, so we reject early instead of silently no-oping.
+ */
+export async function handleImWake(payload: { text?: string }): Promise<AdminResponse> {
+  const ctx = getImMediaContext();
+  if (!ctx) {
+    return {
+      success: false,
+      error: 'No IM context in this session. `myagents im wake` only works inside an IM Bot / Agent Channel session.',
+    };
+  }
+  const resp = await managementApi('/api/im/wake', 'POST', {
+    botId: ctx.botId,
+    text: payload.text || undefined,
+  });
+  if (resp.ok) {
+    return { success: true, hint: 'Heartbeat wake triggered.' };
+  }
+  return mgmtError(resp, 'Failed to trigger wake');
+}
+
+/**
+ * `myagents im channels` — list all configured IM channels (Telegram /
+ * Feishu / DingTalk / OpenClaw plugin bots). Useful for AI to discover what
+ * delivery targets are available before creating a cron task that delivers
+ * to IM. Works in any session — does not require an active IM context.
+ */
+export async function handleImChannels(): Promise<AdminResponse> {
+  const resp = await managementApi('/api/im/channels');
+  if (!resp.ok) {
+    return mgmtError(resp, 'Failed to list IM channels');
+  }
+  // Defensive: Rust contract is `{ ok: true, channels: [...] }`, but a Rust
+  // refactor could regress to `null` / object / missing without compile-time
+  // help on our side. Validate explicitly so we don't propagate a broken
+  // shape to CLI output.
+  const channels = Array.isArray(resp.channels)
+    ? (resp.channels as Array<Record<string, unknown>>)
+    : [];
+  return {
+    success: true,
+    data: { channels },
+    hint: channels.length === 0
+      ? 'No IM channels configured. The user needs to set up an Agent channel (Telegram/Feishu/DingTalk) in Settings first.'
+      : `${channels.length} IM channel${channels.length === 1 ? '' : 's'} configured.`,
+  };
+}
+
 export async function handleImSendMedia(payload: { filePath?: string; caption?: string }): Promise<AdminResponse> {
   if (!payload.filePath) {
     return { success: false, error: 'Missing required field: --file <absolute-path>' };
@@ -2093,8 +2241,8 @@ const README_IM = `myagents im — IM Bot capabilities
 
 WHAT
   Commands that act on the current IM chat (Telegram / Feishu / DingTalk /
-  OpenClaw plugin channels). Only work inside an IM Bot session or
-  Agent Channel session; in desktop sessions they return an error.
+  OpenClaw plugin channels). Most commands only work inside an IM Bot
+  session or Agent Channel session; \`channels\` works anywhere.
 
 COMMANDS
   send-media --file <path> [--caption <text>]
@@ -2103,14 +2251,32 @@ COMMANDS
       audio/video/archives) as a file upload (max 50 MB).
       Write the file first using normal file-writing tools, then call this
       with the absolute path. Use for things the user explicitly wants to
-      receive — not for intermediate work files.
+      receive — not for intermediate work files. IM session only.
+
+  wake [--text <text>]
+      Trigger a heartbeat wake on the current IM bot. Use this when you've
+      done work that produced new state and want to drive the next reasoning
+      cycle yourself instead of waiting for the user. Optional --text adds
+      a contextual hint into the wake message. IM session only.
+
+  channels
+      List configured IM channels (Telegram / Feishu / DingTalk / OpenClaw
+      plugin bots) the user has set up. Useful before creating a cron task
+      that should deliver results to a specific channel. Works in any
+      session — does not require an active IM context.
 
 EXAMPLES
   # Generate a CSV and send it
   myagents im send-media --file /tmp/report.csv --caption "Today's numbers"
 
   # Send a generated chart image
-  myagents im send-media --file /tmp/chart.png`;
+  myagents im send-media --file /tmp/chart.png
+
+  # Discover available IM channels
+  myagents im channels --json
+
+  # Wake yourself with a hint
+  myagents im wake --text "build finished, time to summarize"`;
 
 const README_WIDGET = `myagents widget — Generative UI widget design guidelines
 

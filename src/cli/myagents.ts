@@ -1527,6 +1527,12 @@ function buildRequestBody(
         caption: flags.caption,
       };
     }
+    if (action === 'wake') {
+      return { text: flags.text || rest[0] };
+    }
+    if (action === 'channels') {
+      return {};
+    }
     if (action === 'readme') {
       return {};
     }

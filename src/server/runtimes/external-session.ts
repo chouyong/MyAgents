@@ -847,12 +847,13 @@ async function _doStartExternalSession(options: {
   // Pass the current runtime so L1 identity text reports the correct CLI
   // (e.g. "Google Gemini CLI" instead of the builtin default).
   //
-  // cliToolsEnabled: true — external runtimes can't see the builtin `im-cron`
-  // / `im-media` SDK MCP servers, so we teach the AI about their `myagents`
-  // CLI equivalents via a progressive-disclosure appendix. The builtin path
-  // at agent-session.ts keeps cliToolsEnabled off and continues to use the
-  // in-process MCP servers — no behaviour change. See
-  // prd_0.1.67_external_runtime_cli_skill.md.
+  // cliToolsEnabled: true — teach the AI about `myagents cron …` / `myagents
+  // im send-media` / `myagents im wake|channels` via a progressive-disclosure
+  // appendix. v0.2.11+ also enables this on the builtin path (agent-session.ts)
+  // because the corresponding in-process MCP servers (`cron-tools`, `im-cron`,
+  // `im-media`) were retired in favour of the CLI surface — single source of
+  // truth across builtin + external runtimes. See
+  // prd_0.1.67_external_runtime_cli_skill.md for the original design.
   //
   // Generative-UI widget guidance is universal (no MCP equivalent) and is
   // injected unconditionally for desktop scenarios via buildWidgetSection().

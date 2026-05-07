@@ -1215,8 +1215,14 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'cron/status') return await api.handleCronStatus(payload as Parameters<typeof api.handleCronStatus>[0]);
   if (route === 'cron/exit') return api.handleCronExit(payload as Parameters<typeof api.handleCronExit>[0]);
 
-  // IM runtime commands (session-scoped — only work inside an IM Bot / Agent Channel Sidecar)
+  // IM runtime commands. send-media + wake are session-scoped (require an
+  // IM Bot / Agent Channel context — handlers reject otherwise). channels is
+  // not session-scoped: it discovers all configured IM bots and works in any
+  // session, including desktop, so the AI can reference targets when creating
+  // cron tasks that deliver to IM.
   if (route === 'im/send-media') return await api.handleImSendMedia(payload as Parameters<typeof api.handleImSendMedia>[0]);
+  if (route === 'im/wake') return await api.handleImWake(payload as Parameters<typeof api.handleImWake>[0]);
+  if (route === 'im/channels') return await api.handleImChannels();
 
   // Tool readme — progressive-disclosure helpers for external runtimes
   if (route === 'readme/cron' || route === 'readme/im' || route === 'readme/widget') {
@@ -7603,11 +7609,15 @@ async function main() {
               });
             }
 
-            // After IM context-injected MCPs (im-media / im-bridge-tools) are set,
-            // sync them into the live SDK so its tool list reflects them. Without this,
-            // the pre-warmed SDK (started by heartbeat before any IM message) keeps a
-            // stale mcpServers config and the AI claims tools like im-media__send_media
-            // are "disconnected".
+            // After IM context (which gates the `im-bridge-tools` MCP) is set,
+            // sync the SDK's MCP list so it picks up the bridge server. Without
+            // this, the pre-warmed SDK (started by heartbeat before any IM
+            // message) keeps a stale mcpServers config and bridge plugin tools
+            // appear "disconnected".
+            //
+            // (v0.2.11) `im-media` was retired here — `myagents im send-media`
+            // CLI is the new path, no SDK sync needed for it. `im-bridge-tools`
+            // is the only remaining context-injected MCP this re-sync targets.
             //
             // Position note: called BEFORE setInteractionScenario so the pre-warm's
             // current scenario (typically 'desktop' until the first IM message) is

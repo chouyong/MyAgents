@@ -7,10 +7,13 @@
  *
  * Two scopes
  * ----------
- * - `buildCliToolsAppend(scenario)` — sections that ONLY external runtimes
- *   (Claude Code / Codex / Gemini CLI) need, because the builtin SDK has
- *   equivalent in-process MCP servers (cron-tools, im-cron, im-media). Gated
- *   by `cliToolsEnabled` in `buildSystemPromptAppend`.
+ * - `buildCliToolsAppend(scenario)` — cron / IM media capability hints.
+ *   Universal across runtimes (builtin Claude Agent SDK + Codex / Gemini /
+ *   Claude Code CLI) since v0.2.11 dropped the corresponding in-process MCP
+ *   servers (`cron-tools`, `im-cron`, `im-media`) and unified on the CLI.
+ *   Gated by `cliToolsEnabled` in `buildSystemPromptAppend` (set true on all
+ *   current runtime paths; the flag is retained for theoretical future
+ *   runtimes that might not need the appendix).
  * - `buildWidgetSection(scenario)` — generative-UI widget guidance. Universal:
  *   both builtin SDK and external runtimes load the design contract through
  *   `myagents widget readme <module>` via their shell tool. There is no MCP

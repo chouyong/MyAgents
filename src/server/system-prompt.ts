@@ -58,11 +58,9 @@ const TMPL_CHANNEL_IM = `<myagents-interaction-channel>
 </myagents-interaction-channel>`;
 
 const TMPL_CRON_TASK = `<myagents-cron-task-instructions>
-你正处于心跳循环任务模式 (Task ID: {{taskId}})。每隔 {{intervalText}} 系统触发唤醒你一次。
-{{#if aiCanExit}}
+你正处于心跳循环任务模式 (Task ID: {{taskId}})。每隔 {{intervalText}} 系统触发唤醒你一次。{{#if aiCanExit}}
 
-如果任务目标已完全达成，无需继续定时执行，请调用 \`mcp__cron-tools__exit_cron_task\` 工具来结束任务。
-{{/if}}
+如果任务目标已完全达成、或继续执行无意义/有害，请按下方 \`<myagents-cli-cron-exit>\` 段落给出的 \`myagents cron exit\` 命令结束任务。{{/if}}
 </myagents-cron-task-instructions>`;
 
 const TMPL_HEARTBEAT = `<myagents-heartbeat-instructions>
@@ -101,11 +99,13 @@ export interface SystemPromptOptions {
   runtime?: RuntimeType;
   /**
    * Append the `myagents` CLI capability hints (cron / IM media) to the
-   * prompt. Only set by external-runtime session paths — builtin SDK sessions
-   * reach those capabilities through their dedicated MCP servers (cron-tools
-   * / im-cron / im-media) and MUST NOT have this appendix, to avoid (a) token
-   * waste and (b) confusing the AI with two paths to the same capability.
-   * See prd_0.1.67.
+   * prompt. Set by ALL runtime paths in v0.2.11+ — builtin and external —
+   * because the corresponding in-process MCP servers (`cron-tools` /
+   * `im-cron` / `im-media`) were retired in favour of the CLI surface, so
+   * builtin sessions need the same prompt guidance to discover those
+   * capabilities. Single CLI source of truth across builtin / Codex /
+   * Gemini / Claude Code runtimes. See prd_0.1.67 for the original (then
+   * external-only) introduction; current state described here.
    *
    * Note: generative-UI widget guidance is universal across runtimes (no MCP
    * equivalent — the CLI is the only path) and is emitted unconditionally for

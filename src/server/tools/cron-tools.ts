@@ -1,22 +1,19 @@
-// Custom MCP Tools for Cron Task Management
-// Uses Claude Agent SDK's createSdkMcpServer for in-process tool definitions.
+// Cron task context tracking — sidecar-side state for the AI-driven cron flow.
 //
-// Top-level imports are intentionally SDK/zod-free — the SDK + zod are
-// loaded inside createCronToolsServer() via dynamic import so that modules
-// importing only the context helpers (setCronTaskContext / getCronTaskContext
-// / CRON_TASK_EXIT_TEXT / ...) don't pay the ~300-500ms SDK+zod eval cost.
-// Lazy load is wired through builtin-mcp-meta.ts; the actual server is
-// instantiated on-demand at buildSdkMcpServers() time.
-import { broadcast } from '../sse';
-
-// MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
-type CallToolResult = {
-  content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
-  isError?: boolean;
-};
+// Historical note: this module used to ALSO host an in-process MCP server
+// (`cron-tools` with `exit_cron_task`). The MCP was retired in v0.2.11 in
+// favour of the universal `myagents cron exit` CLI command + system prompt
+// guidance (see system-prompt-cli-tools.ts SECTION_CRON_EXIT). The CLI
+// handler lives in admin-api.ts::handleCronExit and emits the same
+// `cron:task-exit-requested` SSE event the old tool did.
+//
+// What this file still owns: the per-session cron context map. Both the
+// permission gate (agent-session.ts) and the CLI exit handler read it to
+// decide whether the current session is in a cron run and whether the AI
+// is allowed to exit.
 
 // ============= Cron Task Detection Constants =============
-// These are used to detect AI exit requests in response text
+// Used by the cron engine to detect AI exit requests in response text.
 
 /** Marker for AI-initiated task completion (legacy format) */
 export const CRON_TASK_COMPLETE_MARKER = 'CRON_TASK_COMPLETE';
@@ -44,7 +41,8 @@ interface CronTaskContext {
 const cronTaskContextMap = new Map<string, CronTaskContext>();
 
 // Track the "active" session for backward compatibility
-// This is set when setCronTaskContext is called and used by exitCronTaskHandler
+// This is set when setCronTaskContext is called and used by callers that
+// don't pass an explicit sessionId (e.g., admin-api.ts::handleCronExit).
 let activeSessionKey: string | null = null;
 
 /**
@@ -116,93 +114,3 @@ export function clearAllCronTaskContexts(): void {
   activeSessionKey = null;
   console.log('[cron-tools] All contexts cleared');
 }
-
-/**
- * Exit cron task tool handler
- * AI calls this tool when it determines the scheduled task goal is achieved
- */
-async function exitCronTaskHandler(args: { reason: string }): Promise<CallToolResult> {
-  const { reason } = args;
-
-  // Get the current cron task context (uses active session)
-  const context = getCronTaskContext();
-
-  // Check if we're in a cron task context
-  if (!context.taskId) {
-    return {
-      content: [{
-        type: 'text',
-        text: 'Error: exit_cron_task can only be called during a scheduled task execution. No active cron task found.'
-      }],
-      isError: true
-    };
-  }
-
-  // Check if AI is allowed to exit this task
-  if (!context.canExit) {
-    return {
-      content: [{
-        type: 'text',
-        text: 'Error: This scheduled task does not allow AI to exit. The task creator has disabled the "Allow AI to exit" option.'
-      }],
-      isError: true
-    };
-  }
-
-  console.log(`[cron-tools] exit_cron_task called: taskId=${context.taskId}, reason="${reason}"`);
-
-  // Broadcast the completion event to frontend
-  // The frontend will handle updating the task status via Tauri IPC
-  broadcast('cron:task-exit-requested', {
-    taskId: context.taskId,
-    reason,
-    timestamp: new Date().toISOString()
-  });
-
-  return {
-    content: [{
-      type: 'text',
-      text: `${CRON_TASK_EXIT_TEXT}. Reason: ${reason}\n\nThe task will be marked as completed and no further scheduled executions will occur.`
-    }]
-  };
-}
-
-/**
- * Create the cron tools MCP server. Async — SDK + zod are dynamic-imported
- * inside so top-level import of this file stays cheap. Called from
- * builtin-mcp-meta.ts via the META factory at buildSdkMcpServers() time.
- */
-export async function createCronToolsServer() {
-  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
-  const { z } = await import('zod/v4');
-  return createSdkMcpServer({
-    name: 'cron-tools',
-    version: '1.0.0',
-    tools: [
-      tool(
-        'exit_cron_task',
-        `End the current scheduled task. Call this tool when:
-1. The task's goal has been fully achieved and no further executions are needed
-2. You determine that continuing the task would be pointless or counterproductive
-3. An unrecoverable error makes the task impossible to complete
-
-The reason you provide will be displayed to the user in a notification.
-
-IMPORTANT: This tool can only be used during scheduled task execution, and only if the task creator has enabled "Allow AI to exit".`,
-        {
-          reason: z.string()
-            .min(1)
-            .max(500)
-            .describe('A clear explanation of why the task should end. This will be shown to the user.')
-        },
-        exitCronTaskHandler
-      )
-    ]
-  });
-}
-
-/**
- * MCP tool name for exit_cron_task
- * Format: mcp__<server-name>__<tool-name>
- */
-export const EXIT_CRON_TASK_TOOL_NAME = 'mcp__cron-tools__exit_cron_task';

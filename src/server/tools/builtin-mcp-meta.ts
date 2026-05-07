@@ -27,35 +27,6 @@
 
 import { registerBuiltinMcpMeta } from './builtin-mcp-registry';
 
-// --- Context-injected builtins ---
-// (cron-tools, im-cron, im-media) — not user-toggleable; buildSdkMcpServers()
-// conditionally includes them based on sidecar context. Only `server` is
-// needed; configure/validate don't apply.
-
-registerBuiltinMcpMeta({
-  id: 'cron-tools',
-  load: async () => {
-    const m = await import('./cron-tools');
-    return { server: await m.createCronToolsServer() };
-  },
-});
-
-registerBuiltinMcpMeta({
-  id: 'im-cron',
-  load: async () => {
-    const m = await import('./im-cron-tool');
-    return { server: await m.createImCronToolServer() };
-  },
-});
-
-registerBuiltinMcpMeta({
-  id: 'im-media',
-  load: async () => {
-    const m = await import('./im-media-tool');
-    return { server: await m.createImMediaToolServer() };
-  },
-});
-
 // --- User-toggleable builtins ---
 // (gemini-image, edge-tts) — appear in Settings with `command: '__builtin__'`.
 // buildSdkMcpServers() calls `.configure(env, ctx)` before handing the server

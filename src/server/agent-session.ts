@@ -15,9 +15,8 @@ import { ensureGitignorePattern } from './utils/gitignore';
 // these modules. The actual SDK server objects are created on-demand via
 // `getBuiltinMcpInstance()` in buildSdkMcpServers() below. See
 // ./tools/builtin-mcp-meta.ts for META registrations.
-import { getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
+import { clearCronTaskContext } from './tools/cron-tools';
 import { getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
-import { getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
 // Side-effect import — registers META (ids + lazy factories) at cold start.
@@ -103,11 +102,14 @@ export const SDK_RESERVED_MCP_NAMES = ['claude-in-chrome', 'computer-use'];
  * MUST stay in sync with `getActiveContextInjectedBuiltinIds()` and Pattern 1
  * of `buildSdkMcpServers()`. If a new context-injected builtin lands, register
  * its id here too. See issue #148 for the original drift.
+ *
+ * v0.2.11 — `cron-tools`, `im-cron`, and `im-media` were retired in favour of
+ * `myagents` CLI commands + system prompt guidance (single CLI surface usable
+ * across builtin / Codex / Gemini / Claude Code runtimes). Only `im-bridge-tools`
+ * remains a context-injected MCP because its tool surface is a runtime-dynamic
+ * passthrough of OpenClaw plugin tools — no fixed schema to teach via prompt.
  */
 export const MYAGENTS_CONTEXT_INJECTED_MCP_IDS = [
-  'cron-tools',
-  'im-cron',
-  'im-media',
   'im-bridge-tools',
 ] as const;
 
@@ -2105,9 +2107,6 @@ const CONTEXT_INJECTED_BUILTIN_PREDICATES: Record<
   typeof MYAGENTS_CONTEXT_INJECTED_MCP_IDS[number],
   () => boolean
 > = {
-  'cron-tools': () => Boolean(getCronTaskContext().taskId),
-  'im-cron': () => Boolean(process.env.MYAGENTS_MANAGEMENT_PORT),
-  'im-media': () => Boolean(getImMediaContext()) && Boolean(process.env.MYAGENTS_MANAGEMENT_PORT),
   'im-bridge-tools': () => Boolean(getImBridgeToolsContext()) && Boolean(getImBridgeToolServer()),
 };
 
@@ -2140,26 +2139,21 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
   }
   const serverId = parts[1];
 
-  // Context-injected builtin MCPs (cron-tools / im-cron / im-media /
-  // im-bridge-tools) are not in `currentMcpServers` — they're injected by
-  // sidecar context, not user toggles. Allow them when the corresponding
-  // context is active. Mirrors buildSdkMcpServers() Pattern 1.
+  // Context-injected builtin MCPs (currently only `im-bridge-tools`) are not
+  // in `currentMcpServers` — they're injected by sidecar context, not user
+  // toggles. Allow them when the corresponding context is active. Mirrors
+  // buildSdkMcpServers() Pattern 1.
   const activeBuiltins = getActiveContextInjectedBuiltinIds();
   if (activeBuiltins.has(serverId)) {
     return { allowed: true };
   }
-  // Context-injected ids that are NOT active right now → reject with a
-  // context-specific reason. These tools shouldn't be reachable, but if the
-  // model hallucinates one we want a clear message instead of "未启用".
-  if (serverId === 'cron-tools') {
-    return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
-  }
-  if (serverId === 'im-cron') {
-    return { allowed: false, reason: '定时任务管理 API 不可用' };
-  }
-  if (serverId === 'im-media') {
-    return { allowed: false, reason: 'IM 媒体工具仅在 IM 会话中可用' };
-  }
+  // For ids in MYAGENTS_CONTEXT_INJECTED_MCP_IDS but NOT currently active,
+  // reject with a context-specific message instead of the generic "未启用".
+  // Driven by the reserved-id list so it can never drift from Pattern 1.
+  // Retired MCP names (`cron-tools` / `im-cron` / `im-media`) intentionally
+  // fall through to the regular user-MCP check below — they were dropped
+  // from the reserved list in v0.2.11, so user MCPs may now legitimately
+  // claim those names.
   if (serverId === 'im-bridge-tools') {
     return { allowed: false, reason: 'IM Bridge 工具仅在 IM Bridge 插件会话中可用' };
   }
@@ -2241,8 +2235,14 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Convert McpServerDefinition to SDK mcpServers format.
  *
  * Three MCP injection patterns:
- * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on
- *    sidecar context, invisible in Settings UI, not user-toggled.
+ * 1. Context-injected (im-bridge-tools) — always present based on sidecar
+ *    context, invisible in Settings UI, not user-toggled. Used for the
+ *    OpenClaw plugin bridge which exposes a runtime-dynamic tool surface.
+ *    Other historical context-injected MCPs (`cron-tools`, `im-cron`,
+ *    `im-media`) were retired in v0.2.11 — the AI now reaches those
+ *    capabilities through the `myagents` CLI + system prompt guidance,
+ *    so the same surface is available across builtin / Codex / Gemini /
+ *    Claude Code runtimes.
  * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
  *    registered as META in `./tools/builtin-mcp-meta.ts`. Adding a new one:
  *      (a) add `registerBuiltinMcpMeta({ id, load })` block in builtin-mcp-meta.ts, and
@@ -2284,53 +2284,12 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
 
   const result: Record<string, McpServerEntry> = {};
 
-  // Helper — lazy-load a builtin MCP's server object via the META registry.
-  // Returns null if the id isn't registered (shouldn't happen for ids we hard-code,
-  // but defensive). First call for a given id triggers SDK+zod+schema construction
-  // (~100-300ms); subsequent calls in this Sidecar's lifetime are cached no-ops.
-  const loadBuiltinServer = async (id: string) => {
-    const entryPromise = getBuiltinMcpInstance(id);
-    if (!entryPromise) {
-      console.warn(`[agent] Builtin MCP '${id}' not registered in META — skipping`);
-      return null;
-    }
-    const entry = await entryPromise;
-    return entry.server as McpSdkServerConfigWithInstance;
-  };
-
   // --- Pattern 1: Context-injected MCPs (always present based on sidecar context) ---
-  const cronContext = getCronTaskContext();
-  if (cronContext.taskId) {
-    const s = await loadBuiltinServer('cron-tools');
-    if (s) {
-      result['cron-tools'] = s;
-      console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
-    }
-  }
-
-  // Add cron tool for ALL sessions when management API is available
-  // IM sessions use imCronContext (with delivery), regular sessions use sessionCronContext
-  if (process.env.MYAGENTS_MANAGEMENT_PORT) {
-    const s = await loadBuiltinServer('im-cron');
-    if (s) {
-      result['im-cron'] = s;
-      const imCronCtx = getImCronContext();
-      console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
-    }
-  }
-
-  // Add IM media tool if we're in an IM context with management API available
-  const imMediaCtx = getImMediaContext();
-  if (imMediaCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
-    const s = await loadBuiltinServer('im-media');
-    if (s) {
-      result['im-media'] = s;
-      console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
-    }
-  }
-
-  // Add Bridge tools if we're in an IM context with a plugin bridge that has tools
-  // Dynamic server is created from actual plugin tool definitions — transparent passthrough
+  // Add Bridge tools if we're in an IM context with a plugin bridge that has tools.
+  // Dynamic server is created from actual plugin tool definitions — transparent
+  // passthrough. This is the only remaining Pattern 1 MCP after the v0.2.11 cron
+  // / im-cron / im-media → CLI migration: bridge plugins expose runtime-dynamic
+  // tool surfaces that can't be expressed as a static prompt + CLI.
   const bridgeToolsCtx = getImBridgeToolsContext();
   const bridgeServer = getImBridgeToolServer();
   if (bridgeToolsCtx && bridgeServer) {
@@ -7079,6 +7038,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           ),
           // agent-session.ts is the builtin Claude Agent SDK path by definition.
           runtime: 'builtin',
+          // Universal CLI capability surface (cron / IM media). Was external-runtime
+          // only when builtin still had `cron-tools` / `im-cron` / `im-media` MCPs;
+          // those got dropped in favour of `myagents` CLI calls so builtin needs the
+          // same prompt now. Single CLI, single source of truth across all runtimes.
+          cliToolsEnabled: true,
         }),
       },
       cwd: agentDir,
@@ -7158,26 +7122,52 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Auto-allow `myagents widget …` Bash invocations. Loading the widget
-        // design contract used to be an MCP tool (widget_read_me, auto-allowed
-        // via mcp__generative-ui__ trust prefix) — that path is gone, so the
-        // AI now goes through Bash. Without this carve-out, every fresh
-        // desktop session that decides to render a widget would eat one user
-        // permission click before the design guidelines load. The CLI is
-        // MyAgents-managed and the readme path is pure-read.
+        // Auto-allow read-only `myagents` CLI Bash invocations. After the v0.2.11
+        // cron / im-cron / im-media → CLI migration, the AI reaches MyAgents'
+        // own scheduling / IM / widget surface through `myagents <group> …`
+        // instead of MCP tools. Read-only forms (no quoted arg, no shell-injection
+        // surface) are auto-allowed so the AI doesn't burn a permission prompt
+        // on `myagents cron list` or `myagents im channels`. Mutating commands
+        // (`cron add`, `cron exit`, `cron remove`, `im send-media`, `im wake`)
+        // are NOT in this allowlist — they go through the normal canUseTool
+        // prompt in desktop mode, and through the headless fast-path below in
+        // IM / cron mode.
         //
-        // Strict regex: `myagents widget [readme|list|<module>] [<module>...]`
-        // with module names limited to `[a-z][a-z0-9-]*`. Whitespace separators
-        // are restricted to space + tab — `\s` would also match `\n`/`\r`,
-        // letting `myagents widget readme\nrm` slip through (shell executes
-        // it as two lines, second line being any PATH binary whose name
-        // happens to fit module-name shape: `rm`, `bash`, `docker rm`,
-        // `shutdown now`, …). Non-whitespace shell metachars (`;`, `|`,
-        // `&&`, `>`, `$(`, backticks, …) already fail the `[a-z0-9-]` class.
+        // Whitespace separators are restricted to space + tab — `\s` would also
+        // match `\n`/`\r`, letting `myagents widget readme\nrm` slip through
+        // (shell executes the second line as any PATH binary whose name happens
+        // to fit the trailing token shape). Non-whitespace shell metachars
+        // (`;`, `|`, `&&`, `>`, `$(`, backticks, …) already fail the strict
+        // character classes used inside the patterns.
         if (toolName === 'Bash') {
           const cmd = ((input as Record<string, unknown>)?.command as string | undefined)?.trim() ?? '';
+
+          // 1. Widget design contract: `myagents widget [readme|list|<module>] [<module>...]`
+          //    — module names limited to `[a-z][a-z0-9-]*`.
           if (/^myagents[ \t]+widget(?:[ \t]+(?:readme|list))?(?:[ \t]+[a-z][a-z0-9-]*)*[ \t]*$/.test(cmd)) {
             console.log(`[permission] myagents widget readme auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 2. Cron / IM read-only surface (zero-arg listings + readme):
+          //    `myagents cron list|status|readme [--json]`
+          //    `myagents im channels|readme [--json]`
+          if (/^myagents[ \t]+(?:cron[ \t]+(?:list|status|readme)|im[ \t]+(?:channels|readme))(?:[ \t]+--json)?[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents readonly CLI auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 3. Cron run history: `myagents cron runs <taskId> [--limit N] [--full] [--json]`
+          //    — taskId is an opaque slug-style id (alphanumerics + dash/underscore,
+          //    bounded length); --limit takes a small integer. Order-agnostic flags.
+          if (/^myagents[ \t]+cron[ \t]+runs[ \t]+[a-zA-Z0-9_-]{1,64}(?:[ \t]+(?:--limit[ \t]+\d{1,4}|--full|--json))*[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents cron runs auto-allowed: ${cmd}`);
             return {
               behavior: 'allow' as const,
               updatedInput: input as Record<string, unknown>
