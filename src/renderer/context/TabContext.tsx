@@ -136,10 +136,12 @@ export interface TabContextValue extends TabState {
     resetSession: () => Promise<boolean>;
 
     // Tab-scoped API functions (use this Tab's Sidecar)
-    apiGet: <T>(path: string) => Promise<T>;
-    apiPost: <T>(path: string, body?: unknown) => Promise<T>;
-    apiPut: <T>(path: string, body?: unknown) => Promise<T>;
-    apiDelete: <T>(path: string) => Promise<T>;
+    // `opts.signal` cancels the call from the renderer side (e.g., useEffect
+    // cleanup on tab close) without surfacing a "Sidecar gone" warning.
+    apiGet: <T>(path: string, opts?: { signal?: AbortSignal }) => Promise<T>;
+    apiPost: <T>(path: string, body?: unknown, opts?: { signal?: AbortSignal }) => Promise<T>;
+    apiPut: <T>(path: string, body?: unknown, opts?: { signal?: AbortSignal }) => Promise<T>;
+    apiDelete: <T>(path: string, opts?: { signal?: AbortSignal }) => Promise<T>;
 
     // Permission handling
     respondPermission: (decision: 'deny' | 'allow_once' | 'always_allow') => Promise<void>;
@@ -230,10 +232,10 @@ export const TabContext = createContext<TabContextValue>(defaultContextValue);
 export interface TabApiContextValue {
     tabId: string;
     agentDir: string;
-    apiGet: <T>(path: string) => Promise<T>;
-    apiPost: <T>(path: string, body?: unknown) => Promise<T>;
-    apiPut: <T>(path: string, body?: unknown) => Promise<T>;
-    apiDelete: <T>(path: string) => Promise<T>;
+    apiGet: <T>(path: string, opts?: { signal?: AbortSignal }) => Promise<T>;
+    apiPost: <T>(path: string, body?: unknown, opts?: { signal?: AbortSignal }) => Promise<T>;
+    apiPut: <T>(path: string, body?: unknown, opts?: { signal?: AbortSignal }) => Promise<T>;
+    apiDelete: <T>(path: string, opts?: { signal?: AbortSignal }) => Promise<T>;
 }
 
 const defaultApiContextValue: TabApiContextValue = {

@@ -721,20 +721,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
     let cancelled = false;
-    apiGet('/api/runtime/models?type=codex').then((res: unknown) => {
+    // AbortController so a tab-close (effect cleanup) silences the
+    // proxyFetch "Sidecar gone" warning that would otherwise fire when
+    // this in-flight request lands on a sidecar port that just got
+    // released. Tauri invoke can't be cancelled mid-flight, but the
+    // post-hoc filter in proxyFetch turns the rejection into a silent
+    // AbortError instead of a noisy lifecycle log line.
+    const controller = new AbortController();
+    apiGet('/api/runtime/models?type=codex', { signal: controller.signal }).then((res: unknown) => {
       const data = res as { models?: typeof CC_MODELS } | undefined;
       if (!cancelled && data?.models?.length) setCodexModels(data.models);
     }).catch(() => {});
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || currentRuntime !== 'gemini') return;
     let cancelled = false;
-    apiGet('/api/runtime/models?type=gemini').then((res: unknown) => {
+    const controller = new AbortController();
+    apiGet('/api/runtime/models?type=gemini', { signal: controller.signal }).then((res: unknown) => {
       const data = res as { models?: typeof CC_MODELS } | undefined;
       if (!cancelled && data?.models?.length) setGeminiModels(data.models);
     }).catch(() => {});
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
 
   // ─── External runtime pre-warm (v0.1.68) ───
@@ -780,11 +788,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const key = `${sessionId}::${currentRuntime}`;
     if (prewarmedKeyRef.current === key) return;
     prewarmedKeyRef.current = key;
+    // AbortController so tab close (effect cleanup) silences the proxyFetch
+    // lifecycle warning when this request lands on a just-released sidecar
+    // port. The actual prewarm subprocess startup is fire-and-forget — if
+    // the tab closes mid-prewarm we don't care about the result anyway.
+    const controller = new AbortController();
     apiPost('/api/runtime/prewarm', {
       sessionId,
       model: effectiveModel,  // may be undefined — runtime falls back to its default
       permissionMode: effectivePermissionMode,
-    }).then((res) => {
+    }, { signal: controller.signal }).then((res) => {
       // Backend returns { success: true, prewarmed: false, reason: '...' } when
       // the endpoint short-circuits (already-active/starting, runtime mismatch,
       // non-persistent runtime). In those cases the subprocess is NOT warm, so
@@ -794,12 +807,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       if (data && data.prewarmed === false) {
         prewarmedKeyRef.current = null;
       }
-    }).catch((err) => {
+    }).catch((err: unknown) => {
+      // Aborted (tab close, dep change) is the expected silent path.
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        prewarmedKeyRef.current = null; // allow re-fire if effect re-runs
+        return;
+      }
       // Pre-warm failure is non-fatal — the first user message path still
       // starts the runtime normally (just without the latency optimization).
       console.debug('[prewarm] request failed (non-fatal):', err);
       prewarmedKeyRef.current = null; // allow a later retry
     });
+    return () => { controller.abort(); };
     // Intentionally omit effectiveModel/effectivePermissionMode from deps —
     // config changes kill the pre-warmed process via setExternalModel/
     // setExternalPermissionMode, and the next user message will resume with

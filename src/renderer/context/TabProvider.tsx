@@ -164,18 +164,34 @@ async function getBaseUrl(tabId: string, sessionId?: string | null): Promise<str
     return getTabServerUrl(tabId);
 }
 
+/** Optional per-call options for Tab-scoped fetch helpers. */
+interface TabApiCallOptions {
+    /**
+     * Pass an AbortSignal to cancel the request from the renderer side. The
+     * underlying Tauri invoke can't truly be cancelled, but if the signal is
+     * aborted before / during the call, proxyFetch silently throws AbortError
+     * instead of logging a "Sidecar gone" warning. The classic use case is a
+     * useEffect cleanup that fires when the tab is closing — without this,
+     * every tab close emits noisy lifecycle warnings for in-flight prewarm /
+     * runtime/models requests that would have succeeded had the tab survived
+     * a few more milliseconds.
+     */
+    signal?: AbortSignal;
+}
+
 /**
  * Create a Tab-scoped POST function
  * Uses Session-centric port lookup when sessionId is available
  */
 function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
-    return async <T,>(path: string, body?: unknown): Promise<T> => {
+    return async <T,>(path: string, body?: unknown, opts?: TabApiCallOptions): Promise<T> => {
         const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: body ? JSON.stringify(body) : undefined
+            body: body ? JSON.stringify(body) : undefined,
+            signal: opts?.signal,
         });
         return handleApiResponse<T>(response);
     };
@@ -186,10 +202,10 @@ function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<stri
  * Uses Session-centric port lookup when sessionId is available
  */
 function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
-    return async <T,>(path: string): Promise<T> => {
+    return async <T,>(path: string, opts?: TabApiCallOptions): Promise<T> => {
         const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
-        const response = await proxyFetch(url);
+        const response = await proxyFetch(url, { signal: opts?.signal });
         return handleApiResponse<T>(response);
     };
 }
@@ -199,13 +215,14 @@ function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<st
  * Uses Session-centric port lookup when sessionId is available
  */
 function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
-    return async <T,>(path: string, body?: unknown): Promise<T> => {
+    return async <T,>(path: string, body?: unknown, opts?: TabApiCallOptions): Promise<T> => {
         const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: body ? JSON.stringify(body) : undefined
+            body: body ? JSON.stringify(body) : undefined,
+            signal: opts?.signal,
         });
         return handleApiResponse<T>(response);
     };
@@ -216,10 +233,10 @@ function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<st
  * Uses Session-centric port lookup when sessionId is available
  */
 function createApiDelete(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
-    return async <T,>(path: string): Promise<T> => {
+    return async <T,>(path: string, opts?: TabApiCallOptions): Promise<T> => {
         const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
-        const response = await proxyFetch(url, { method: 'DELETE' });
+        const response = await proxyFetch(url, { method: 'DELETE', signal: opts?.signal });
         return handleApiResponse<T>(response);
     };
 }

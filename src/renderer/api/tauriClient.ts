@@ -328,11 +328,26 @@ export function getActiveTabId(): string | undefined {
 /**
  * Proxy HTTP request through Rust to bypass WebView CORS
  * Falls back to native fetch in browser mode
+ *
+ * `options.signal` (AbortSignal) is honoured both at the front edge (already
+ * aborted → throw immediately, never invoke Rust) and at the catch site
+ * (aborted between request and failure → throw AbortError silently, no
+ * "Sidecar gone" log noise). The underlying Tauri `invoke` cannot itself
+ * be interrupted, but post-hoc filtering still lets callers — typically
+ * useEffect cleanup paths fired by tab close — hide the expected
+ * lifecycle warning that would otherwise spam the unified log.
  */
 export async function proxyFetch(
     url: string,
     options?: RequestInit
 ): Promise<Response> {
+    const signal = options?.signal;
+    // Pre-check: caller already aborted (e.g., useEffect cleanup ran before
+    // we got the chance to invoke). Throw AbortError without touching Rust.
+    if (signal?.aborted) {
+        throw new DOMException('proxyFetch aborted before dispatch', 'AbortError');
+    }
+
     // Browser mode: use native fetch (Vite proxy handles CORS)
     if (!isTauri()) {
         return fetch(url, options);
@@ -439,6 +454,18 @@ export async function proxyFetch(
             headers: result.headers,
         });
     } catch (error) {
+        // If the caller aborted while the invoke was in flight, the Tauri
+        // task may still complete server-side, but the renderer-side
+        // promise should resolve as AbortError without polluting the log.
+        // This is the common tab-close case: Cmd+W triggered useEffect
+        // cleanup → controller.abort() → request was already on the wire
+        // hitting a sidecar port that just died. The Rust side already
+        // logs that at WARN ("[proxy] Request failed ..."); duplicating it
+        // here as a renderer "Sidecar gone" line is pure noise.
+        if (signal?.aborted) {
+            throw new DOMException('proxyFetch aborted', 'AbortError');
+        }
+
         // Classify lifecycle vs genuine fault — mirrors the Rust side
         // (sse_proxy.rs `proxy_http_request`), which already downgrades
         // localhost connect/send-class errors from ERROR to WARN. Without
