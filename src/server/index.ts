@@ -7872,6 +7872,26 @@ async function main() {
             );
           }
 
+          // (v0.2.11 cross-bugfix #142 review-fix-3 medium #2)
+          // mode === 'unknown' means the requestId wasn't in any cancellable
+          // state — it could be a promote-then-cancel race (item already
+          // handed off to generator, no longer in queue/pending). DO NOT
+          // emit `cancelled` to the UI in that case: the SDK can still
+          // process the message, and the client would see "cancelled"
+          // while the AI keeps answering. Return 409 Conflict so the IM
+          // client surfaces "cancel failed" instead.
+          if (cancelResult.mode === 'unknown') {
+            return jsonResponse(
+              {
+                success: false,
+                requestId: body.requestId,
+                mode: cancelResult.mode,
+                error: 'Request not in a cancellable state — message may already be in flight',
+              },
+              409,
+            );
+          }
+
           // Step 3: bus event for UI feedback (so the reply slot closes promptly).
           imEventBus.emit(body.requestId, 'cancelled', reason);
 
