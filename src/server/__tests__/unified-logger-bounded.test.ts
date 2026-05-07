@@ -9,10 +9,38 @@
  *      what's queued to disk synchronously when called.
  *  (c) The recent-lines ring buffer (used by the crash dumper) caps at
  *      its capacity even when the input far exceeds it.
+ *
+ * Isolation: `vi.mock('../logUtils')` redirects LOGS_DIR to a per-run
+ * tmpdir BEFORE UnifiedLogger imports it, so the test never writes to
+ * the developer's real `~/.myagents/logs/`. (Prior versions polluted
+ * the real unified log with thousands of `[bench]` entries every run.)
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Hoisted to run before any `import` is resolved, so the path string is
+// available when `vi.mock`'s factory is later invoked. We deliberately
+// only compute a path here — directory creation happens lazily inside
+// the mocked `ensureLogsDir`, which runs after fs imports are bound.
+const { TEST_LOGS_ROOT, TEST_LOGS_DIR } = vi.hoisted(() => {
+  // Use only globals available pre-import: `process` + a unique suffix.
+  const root = `${process.env.TMPDIR ?? '/tmp'}`.replace(/\/+$/, '')
+    + `/myagents-unified-log-test-${process.pid}-${Date.now()}`;
+  return { TEST_LOGS_ROOT: root, TEST_LOGS_DIR: `${root}/logs` };
+});
+
+vi.mock('../logUtils', () => ({
+  MYAGENTS_DIR: TEST_LOGS_ROOT,
+  LOGS_DIR: TEST_LOGS_DIR,
+  ensureLogsDir: () => {
+    if (!existsSync(TEST_LOGS_DIR)) {
+      mkdirSync(TEST_LOGS_DIR, { recursive: true });
+    }
+  },
+}));
+
 import {
   appendUnifiedLog,
   appendUnifiedLogBatch,
@@ -20,15 +48,8 @@ import {
   _getDroppedCount,
   getRecentLogLines,
 } from '../UnifiedLogger';
-import { LOGS_DIR } from '../logUtils';
+import { localTimestamp } from '../../shared/logTime';
 import type { LogEntry } from '../../renderer/types/log';
-
-// LOGS_DIR is resolved from `homedir()` at module-load time, before any
-// test setup can override HOME. So instead of redirecting the path, we
-// snapshot the current logs directory state at the start of each test
-// and assert about size/file deltas after the test runs. Files written
-// here go into the developer's real ~/.myagents/logs but with a
-// `[bench]` prefix that makes them trivially identifiable / cleanable.
 
 interface DirSnapshot {
   files: Map<string, number>; // filename → size
@@ -36,11 +57,11 @@ interface DirSnapshot {
 
 function snapshot(): DirSnapshot {
   const files = new Map<string, number>();
-  if (existsSync(LOGS_DIR)) {
-    for (const f of readdirSync(LOGS_DIR)) {
+  if (existsSync(TEST_LOGS_DIR)) {
+    for (const f of readdirSync(TEST_LOGS_DIR)) {
       if (!f.startsWith('unified-') || !f.endsWith('.log')) continue;
       try {
-        files.set(f, statSync(`${LOGS_DIR}/${f}`).size);
+        files.set(f, statSync(join(TEST_LOGS_DIR, f)).size);
       } catch { /* ignore */ }
     }
   }
@@ -50,13 +71,24 @@ function snapshot(): DirSnapshot {
 let before: DirSnapshot;
 
 beforeEach(() => {
+  // Ensure the directory exists so snapshot() returns a stable baseline.
+  if (!existsSync(TEST_LOGS_DIR)) {
+    mkdirSync(TEST_LOGS_DIR, { recursive: true });
+  }
   before = snapshot();
 });
 
 afterEach(() => {
-  // Best-effort: nothing to clean — the test entries land in the real
-  // unified log file alongside any other dev activity, identifiable by
-  // their `[bench]` prefix. Retention/eviction will trim them eventually.
+  // Drain anything the 100ms flusher might still be queueing so it doesn't
+  // leak into the next test's snapshot baseline.
+  _flushUnifiedLogForTests();
+});
+
+afterAll(() => {
+  // Best-effort cleanup of the temp dir tree.
+  try {
+    rmSync(TEST_LOGS_ROOT, { recursive: true, force: true });
+  } catch { /* ignore */ }
 });
 
 function makeEntry(i: number): LogEntry {
@@ -64,7 +96,10 @@ function makeEntry(i: number): LogEntry {
     source: 'bun',
     level: 'info',
     message: `[bench] entry ${i}`,
-    timestamp: new Date().toISOString(),
+    // Match production's localTimestamp() format so log-line timestamps
+    // stay consistent with the rest of the unified log (no UTC mismatch
+    // when grepping by today's local date).
+    timestamp: localTimestamp(),
   };
 }
 

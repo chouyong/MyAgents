@@ -17,7 +17,23 @@
  * have sent to clients.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Stub UnifiedLogger so console.warn → createAndBroadcast → appendUnifiedLog
+// doesn't actually write to the developer's real ~/.myagents/logs/. The
+// behaviour under test (correlation-field merging on the broadcast LogEntry)
+// is fully observable via the in-memory `captured[]` array; disk writes
+// would only pollute the unified log with `[test]` lines that have no
+// diagnostic value outside the test run.
+vi.mock('../UnifiedLogger', () => ({
+  appendUnifiedLog: () => {},
+  appendUnifiedLogBatch: () => {},
+  _flushUnifiedLogForTests: () => {},
+  _getDroppedCount: () => 0,
+  getRecentLogLines: () => [],
+  getActiveUnifiedLogPath: () => null,
+}));
+
 import { initLogger, restoreConsole, withLogContext } from '../logger';
 import {
   setAmbientLogContext,
