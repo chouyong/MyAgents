@@ -599,8 +599,10 @@ export default function SessionHistoryDropdown({
                 </div>
             </Popover>
 
-            {/* Centered confirm dialog — mirrors launcher RecentTasks UX */}
-            {pendingDelete && (
+            {/* Centered confirm dialog — portal to body so z-[300] beats the
+             *  Popover's FloatingPortal (z-50 at body level). Inline render
+             *  gets clamped by an ancestor stacking context. */}
+            {pendingDelete && createPortal(
                 <ConfirmDialog
                     title="删除对话"
                     message={`确定要删除「${pendingDelete.title}」吗？此操作不可撤销。`}
@@ -608,7 +610,8 @@ export default function SessionHistoryDropdown({
                     confirmVariant="danger"
                     onConfirm={handleConfirmDelete}
                     onCancel={handleCancelDelete}
-                />
+                />,
+                document.body,
             )}
 
             {/* Stats Modal — portal to document root to escape stacking context */}
