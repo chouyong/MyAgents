@@ -1972,18 +1972,28 @@ export default function TabProvider({
                 // A message was queued — add to frontend queue state for UI rendering.
                 // Deduplication: sendMessage's .then() may also add the same queueId,
                 // and optimistic entries (opt-*) may already exist from sendMessage.
-                const payload = data as { queueId: string; messageText: string } | null;
+                // (v0.2.12) `isInFlight` indicates the backend has already yielded
+                // this item to the SDK CLI — it is in CLI's commandQueue and the
+                // X cancel button must be hidden (see QueuedMessageBubble).
+                const payload = data as { queueId: string; messageText: string; isInFlight?: boolean } | null;
                 if (payload?.queueId) {
-                    console.log(`[TabProvider] queue:added queueId=${payload.queueId}`);
+                    console.log(`[TabProvider] queue:added queueId=${payload.queueId} isInFlight=${!!payload.isInFlight}`);
                     setQueuedMessages(prev => {
-                        // Exact queueId match — already added by .then()
-                        if (prev.some(q => q.queueId === payload.queueId)) return prev;
+                        // Exact queueId match — already added by .then(); update isInFlight if it changed.
+                        const existingIdx = prev.findIndex(q => q.queueId === payload.queueId);
+                        if (existingIdx !== -1) {
+                            if (prev[existingIdx].isInFlight === !!payload.isInFlight) return prev;
+                            const next = [...prev];
+                            next[existingIdx] = { ...prev[existingIdx], isInFlight: !!payload.isInFlight };
+                            return next;
+                        }
                         // Optimistic entry exists — .then() will reconcile with real queueId
                         if (prev.some(q => q.queueId.startsWith('opt-'))) return prev;
                         return [...prev, {
                             queueId: payload.queueId,
                             text: payload.messageText,
                             timestamp: Date.now(),
+                            isInFlight: !!payload.isInFlight,
                         }];
                     });
                 }
@@ -2491,7 +2501,7 @@ export default function TabProvider({
         // When no providerEnv is given (subscription mode), send 'subscription' explicitly
         // so enqueueUserMessage knows this is an intentional switch, not "I don't know".
         // IM/Cron callers omit the field entirely (undefined = "keep current provider").
-        postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string }>('/chat/send', {
+        postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string; isInFlight?: boolean }>('/chat/send', {
             text: trimmed,
             images: imageData,
             permissionMode: permissionMode ?? 'auto',
@@ -2517,10 +2527,15 @@ export default function TabProvider({
                             setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                         }
                     } else if (localQueueId) {
-                        // Replace optimistic entry with real queueId + enrich with image data
+                        // Replace optimistic entry with real queueId + isInFlight + enrich with image data
                         setQueuedMessages(prev => prev.map(q =>
                             q.queueId === localQueueId
-                                ? { ...q, queueId: realQueueId, images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })) }
+                                ? {
+                                    ...q,
+                                    queueId: realQueueId,
+                                    isInFlight: !!response.isInFlight,
+                                    images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                                }
                                 : q
                         ));
                     } else {
@@ -2539,6 +2554,7 @@ export default function TabProvider({
                                 text: trimmed,
                                 images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
                                 timestamp: Date.now(),
+                                isInFlight: !!response.isInFlight,
                             }];
                         });
                     }

@@ -726,7 +726,13 @@ export class GeminiRuntime implements AgentRuntime {
       // Detached → child becomes its own pgroup leader on POSIX so
       // killWithEscalation({ killTree: true }) below can reach all of
       // gemini's tool-call subprocesses, not just the wrapper.
-      detached: true,
+      //
+      // Windows: `detached: true` + stdio:'pipe' prevents parent stdout reads
+      // (same bug class as #170 #3/#5 for codex/claude). Windows tree-kill via
+      // `taskkill /F /T /PID` works without detached. `windowsHide: true`
+      // suppresses the cmd.exe console window flash for gemini.cmd shim.
+      detached: process.platform !== 'win32',
+      windowsHide: true,
     });
 
     const geminiProc = new GeminiProcess(proc);

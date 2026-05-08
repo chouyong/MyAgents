@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use notify_debouncer_full::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
 
+use crate::utils::bom::strip_bom;
 use crate::{ulog_error, ulog_info, ulog_warn};
 
 use super::session_indexer::SessionIndex;
@@ -245,7 +246,7 @@ fn read_snapshot(sessions_file: &Path) -> HashMap<String, SessionSnapshot> {
         Ok(s) => s,
         Err(_) => return HashMap::new(),
     };
-    let parsed: Vec<serde_json::Value> = match serde_json::from_str(&content) {
+    let parsed: Vec<serde_json::Value> = match serde_json::from_str(strip_bom(&content)) {
         Ok(v) => v,
         Err(_) => return HashMap::new(),
     };

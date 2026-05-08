@@ -273,6 +273,172 @@ pub(crate) fn classify_sidecar_stderr(line: &str) -> SidecarStderrLevel {
 }
 
 #[cfg(test)]
+mod session_activation_tab_uniqueness_tests {
+    use super::*;
+
+    /// Helper: shape an activate_session call with sensible defaults.
+    fn activate(mgr: &mut SidecarManager, session_id: &str, tab_id: Option<&str>, port: u16) {
+        mgr.activate_session(
+            session_id.to_string(),
+            tab_id.map(String::from),
+            None,
+            port,
+            "/tmp/workspace".to_string(),
+            false,
+        );
+    }
+
+    /// Helper: collect (session_id, tab_id) pairs for assertion clarity.
+    fn snapshot(mgr: &SidecarManager) -> Vec<(String, Option<String>)> {
+        let mut v: Vec<(String, Option<String>)> = mgr.session_activations
+            .iter()
+            .map(|(sid, a)| (sid.clone(), a.tab_id.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn activate_session_clears_stale_tab_id_from_other_activations() {
+        let mut mgr = SidecarManager::new();
+        // First activation: session_X owned by tab T_A.
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+        // New activation: same tab T_A claims session_Y. Without the
+        // uniqueness fix, both session_X and session_Y would carry
+        // tab_id=Some("T_A") simultaneously, and the priority-2
+        // `find(|a| a.tab_id == Some("T_A"))` lookup in
+        // get_tab_server_url would return either entry depending on
+        // HashMap iteration order — issue #169's stop-routes-to-wrong-
+        // session bug.
+        activate(&mut mgr, "session_Y", Some("T_A"), 31419);
+
+        let snap = snapshot(&mgr);
+        // session_X's tab_id MUST be cleared. session_Y MUST own T_A.
+        assert_eq!(snap, vec![
+            ("session_X".to_string(), None),
+            ("session_Y".to_string(), Some("T_A".to_string())),
+        ]);
+    }
+
+    #[test]
+    fn update_session_tab_clears_stale_tab_id_from_other_activations() {
+        let mut mgr = SidecarManager::new();
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+        activate(&mut mgr, "session_Y", None, 31419);
+
+        // Tab T_A switches to session_Y via update_session_tab. The fix
+        // must transfer the tab binding, not duplicate it.
+        mgr.update_session_tab("session_Y", Some("T_A".to_string()));
+
+        let snap = snapshot(&mgr);
+        assert_eq!(snap, vec![
+            ("session_X".to_string(), None),
+            ("session_Y".to_string(), Some("T_A".to_string())),
+        ]);
+    }
+
+    #[test]
+    fn update_session_tab_to_none_does_not_touch_other_activations() {
+        let mut mgr = SidecarManager::new();
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+        activate(&mut mgr, "session_Y", Some("T_B"), 31419);
+
+        // Clearing T_A from session_X shouldn't affect session_Y's
+        // unrelated tab_id.
+        mgr.update_session_tab("session_X", None);
+
+        let snap = snapshot(&mgr);
+        assert_eq!(snap, vec![
+            ("session_X".to_string(), None),
+            ("session_Y".to_string(), Some("T_B".to_string())),
+        ]);
+    }
+
+    #[test]
+    fn activate_session_self_keeps_its_own_tab_id() {
+        let mut mgr = SidecarManager::new();
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+        // Re-activate the same session with the same tab_id — this
+        // should NOT clear its own tab_id during the uniqueness sweep
+        // (the sweep skips the keeper session_id).
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+
+        let snap = snapshot(&mgr);
+        assert_eq!(snap, vec![("session_X".to_string(), Some("T_A".to_string()))]);
+    }
+
+    #[test]
+    fn multiple_unrelated_tabs_coexist() {
+        let mut mgr = SidecarManager::new();
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+        activate(&mut mgr, "session_Y", Some("T_B"), 31419);
+        activate(&mut mgr, "session_Z", Some("T_C"), 31420);
+
+        // Three tabs each on their own session — no interference.
+        let snap = snapshot(&mgr);
+        assert_eq!(snap, vec![
+            ("session_X".to_string(), Some("T_A".to_string())),
+            ("session_Y".to_string(), Some("T_B".to_string())),
+            ("session_Z".to_string(), Some("T_C".to_string())),
+        ]);
+    }
+
+    #[test]
+    fn clearing_tab_id_preserves_task_id_and_port() {
+        // When session_X loses its tab binding because tab T_A claims
+        // session_Y, session_X's other fields (task_id, port, workspace,
+        // is_cron_task) MUST stay intact — the cron / BG owner that
+        // keeps the sidecar alive still depends on them.
+        let mut mgr = SidecarManager::new();
+        mgr.activate_session(
+            "session_X".to_string(),
+            Some("T_A".to_string()),
+            Some("task-123".to_string()),
+            31418,
+            "/tmp/workspace_x".to_string(),
+            true,
+        );
+        // Tab T_A switches to session_Y → session_X's tab_id must clear,
+        // but task_id="task-123" / port=31418 / workspace must persist.
+        mgr.activate_session(
+            "session_Y".to_string(),
+            Some("T_A".to_string()),
+            None,
+            31419,
+            "/tmp/workspace_y".to_string(),
+            false,
+        );
+
+        let session_x = mgr.session_activations.get("session_X").expect("session_X stays");
+        assert_eq!(session_x.tab_id, None);
+        assert_eq!(session_x.task_id.as_deref(), Some("task-123"));
+        assert_eq!(session_x.port, 31418);
+        assert_eq!(session_x.workspace_path, "/tmp/workspace_x");
+        assert!(session_x.is_cron_task);
+    }
+
+    #[test]
+    fn get_tab_server_url_returns_unique_port_after_tab_switch() {
+        // Integration-style check: the priority-2 fallback in
+        // get_tab_server_url iterates session_activations.values() to
+        // find by tab_id. After enforcing uniqueness, there can only
+        // be one match — so the port returned is deterministic
+        // regardless of HashMap iteration order.
+        let mut mgr = SidecarManager::new();
+        activate(&mut mgr, "session_X", Some("T_A"), 31418);
+        activate(&mut mgr, "session_Y", Some("T_A"), 31419); // T_A switches to session_Y
+
+        // Find by tab_id == T_A: must be session_Y (port 31419), not session_X.
+        let matches: Vec<(String, u16)> = mgr.session_activations.values()
+            .filter(|a| a.tab_id.as_deref() == Some("T_A"))
+            .map(|a| (a.session_id.clone(), a.port))
+            .collect();
+        assert_eq!(matches.len(), 1, "tab_id uniqueness violated: {:?}", matches);
+        assert_eq!(matches[0], ("session_Y".to_string(), 31419));
+    }
+}
+
+#[cfg(test)]
 mod stderr_classifier_tests {
     use super::*;
 
@@ -957,6 +1123,56 @@ impl SidecarManager {
         self.session_activations.get(session_id)
     }
 
+    /// (v0.2.12 — issue #169 fix) Enforce tab_id uniqueness across
+    /// `session_activations`: at most one activation may have a given
+    /// `tab_id == Some(T)` at any time. Called from `activate_session`
+    /// and `update_session_tab` BEFORE writing the new tab_id.
+    ///
+    /// Why: `get_tab_server_url`'s priority-2 fallback iterates
+    /// `session_activations.values().find(|a| a.tab_id == Some(tab_id))`
+    /// and returns the first match. HashMap iteration order is non-
+    /// deterministic, so two activations with the same tab_id mean a
+    /// stop / queue-force / any other tab-keyed lookup may resolve to
+    /// the wrong session's port → wrong Sidecar gets the request →
+    /// wrong session aborted. Issue #169 reported 4 such cross-tab
+    /// stop incidents in one day.
+    ///
+    /// The window where two activations briefly share a tab_id opens
+    /// during tab→session switches: the renderer sequence is
+    /// `update_session_tab(new_session, T)` → ... → `deactivate_session
+    /// (old_session)`. Between those two awaits, both `new_session` and
+    /// `old_session` carry `tab_id == Some(T)`. By proactively clearing
+    /// the old binding here, we close that window unconditionally —
+    /// regardless of whether the renderer remembers to call
+    /// `deactivate_session` afterwards.
+    ///
+    /// Skips the entry whose key matches `keeper_session_id` (the
+    /// caller's own session_id) so we don't clobber the write we're
+    /// about to make.
+    fn clear_tab_id_from_other_activations(
+        &mut self,
+        keeper_session_id: &str,
+        tab_id: &str,
+    ) {
+        let stale_session_ids: Vec<String> = self.session_activations
+            .iter()
+            .filter(|(sid, a)| {
+                sid.as_str() != keeper_session_id
+                    && a.tab_id.as_deref() == Some(tab_id)
+            })
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        for sid in stale_session_ids {
+            if let Some(activation) = self.session_activations.get_mut(&sid) {
+                ulog_info!(
+                    "[sidecar] Clearing stale tab_id {:?} from session {} (now claimed by session {})",
+                    tab_id, sid, keeper_session_id
+                );
+                activation.tab_id = None;
+            }
+        }
+    }
+
     /// Activate a session (associate it with a Sidecar)
     pub fn activate_session(
         &mut self,
@@ -971,6 +1187,12 @@ impl SidecarManager {
             "[sidecar] Activating session {} on port {}, tab: {:?}, task: {:?}, cron: {}",
             session_id, port, tab_id, task_id, is_cron_task
         );
+        // (v0.2.12 — issue #169 fix) Enforce tab_id uniqueness BEFORE
+        // inserting the new activation, so the new entry's tab_id is the
+        // only match for `find(|a| a.tab_id == Some(tab_id))`.
+        if let Some(ref tid) = tab_id {
+            self.clear_tab_id_from_other_activations(&session_id, tid);
+        }
         self.session_activations.insert(
             session_id.clone(),
             SessionActivation {
@@ -992,6 +1214,13 @@ impl SidecarManager {
 
     /// Update session activation's tab_id (e.g., when a Tab connects to headless Sidecar)
     pub fn update_session_tab(&mut self, session_id: &str, tab_id: Option<String>) {
+        // (v0.2.12 — issue #169 fix) Enforce tab_id uniqueness BEFORE
+        // mutating the target entry, so by the time the read below
+        // finalizes, no other activation carries the same tab_id.
+        // (Skipped when clearing — `tab_id == None` can't collide.)
+        if let Some(ref tid) = tab_id {
+            self.clear_tab_id_from_other_activations(session_id, tid);
+        }
         if let Some(activation) = self.session_activations.get_mut(session_id) {
             ulog_info!(
                 "[sidecar] Updating session {} tab: {:?} -> {:?}",
@@ -4287,12 +4516,9 @@ pub async fn cmd_propagate_proxy(
 
 // ─── Agent Runtime resolution (v0.1.59) ───
 
-/// Strip UTF-8 BOM (U+FEFF) from the beginning of a string.
-/// Windows editors (Notepad, etc.) commonly inject BOM into UTF-8 files.
-/// serde_json::from_str cannot handle BOM — it causes parse failures.
-fn strip_bom(content: &str) -> &str {
-    content.strip_prefix('\u{FEFF}').unwrap_or(content)
-}
+// BOM-stripping moved to crate::utils::bom (issue #170 #6) so all JSON-
+// reading sites share a single helper.
+use crate::utils::bom::strip_bom;
 
 /// Look up the `runtime` field from the agent config in ~/.myagents/config.json
 /// matching the given workspace path. Returns None for "builtin" (the default).

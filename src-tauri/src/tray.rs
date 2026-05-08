@@ -11,6 +11,7 @@ use tauri::{
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
 
+use crate::utils::bom::strip_bom;
 use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 /// Menu item IDs for tray right-click menu
@@ -134,7 +135,7 @@ pub fn should_minimize_to_tray() -> bool {
         let config_path = home.join(".myagents").join("config.json");
 
         if let Ok(content) = fs::read_to_string(&config_path) {
-            if let Ok(config) = serde_json::from_str::<PartialAppConfig>(&content) {
+            if let Ok(config) = serde_json::from_str::<PartialAppConfig>(strip_bom(&content)) {
                 if let Some(minimize) = config.minimize_to_tray {
                     ulog_debug!("[Tray] minimizeToTray from config: {}", minimize);
                     return minimize;

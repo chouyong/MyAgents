@@ -19,6 +19,7 @@ use serde::Deserialize;
 use std::fs;
 use std::process::Command;
 
+use crate::utils::bom::strip_bom;
 use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 /// Default proxy protocol (when not specified in config)
@@ -93,8 +94,9 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
         }
     };
 
-    // Strip UTF-8 BOM if present (Windows editors inject BOM into config.json)
-    let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+    // Strip UTF-8 BOM if present (Windows editors inject BOM into config.json).
+    // Helper centralized in utils/bom.rs (issue #170 #6).
+    let content = strip_bom(&content);
 
     // Parse JSON
     let config: PartialAppConfig = match serde_json::from_str(content) {

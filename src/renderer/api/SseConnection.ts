@@ -55,7 +55,7 @@ const JSON_EVENTS = new Set([
     'chat:task-started',    // Background task (SDK Task tool) started
     'chat:task-notification', // Background task completed/failed/stopped
     'mcp:oauth-expired',    // MCP OAuth token expired (trigger re-auth prompt)
-    'queue:added',     // Message queued (confirmation)
+    'queue:added',     // Message queued (confirmation; carries isInFlight; re-emitted on promote to flip isInFlight true)
     'queue:started',   // Queued message started executing
     'queue:cancelled', // Queued message cancelled
     'chat:message-sdk-uuid', // SDK UUID assignment for user/assistant messages (fork button, rewind)

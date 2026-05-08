@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
 
 use crate::ulog_warn;
+use crate::utils::bom::strip_bom;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -161,7 +162,7 @@ impl SessionIndex {
         let content = fs::read_to_string(&sessions_file)
             .map_err(|e| format!("Failed to read sessions.json: {}", e))?;
 
-        let sessions: Vec<serde_json::Value> = serde_json::from_str(&content)
+        let sessions: Vec<serde_json::Value> = serde_json::from_str(strip_bom(&content))
             .map_err(|e| format!("Failed to parse sessions.json: {}", e))?;
 
         // Get set of already-indexed session IDs
@@ -268,7 +269,7 @@ impl SessionIndex {
         let data_dir = sessions_dir.parent().unwrap_or(Path::new("."));
         let sessions_file = data_dir.join("sessions.json");
         if let Ok(content) = fs::read_to_string(&sessions_file) {
-            if let Ok(sessions) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            if let Ok(sessions) = serde_json::from_str::<Vec<serde_json::Value>>(strip_bom(&content)) {
                 if let Some(meta) = sessions.iter().find(|s| {
                     s.get("id").and_then(|v| v.as_str()) == Some(session_id)
                 }) {
@@ -324,7 +325,7 @@ impl SessionIndex {
         let sessions_file = data_dir.join("sessions.json");
         let meta_raw = fs::read_to_string(&sessions_file).unwrap_or_default();
         let sessions_json: Vec<serde_json::Value> =
-            serde_json::from_str(&meta_raw).unwrap_or_default();
+            serde_json::from_str(strip_bom(&meta_raw)).unwrap_or_default();
         let meta = match sessions_json.iter().find(|s| {
             s.get("id").and_then(|v| v.as_str()) == Some(session_id)
         }) {
@@ -400,7 +401,7 @@ impl SessionIndex {
         let sessions_file = data_dir.join("sessions.json");
         let meta_raw = fs::read_to_string(&sessions_file).unwrap_or_default();
         let sessions_json: Vec<serde_json::Value> =
-            serde_json::from_str(&meta_raw).unwrap_or_default();
+            serde_json::from_str(strip_bom(&meta_raw)).unwrap_or_default();
         let meta = match sessions_json.iter().find(|s| {
             s.get("id").and_then(|v| v.as_str()) == Some(session_id)
         }) {

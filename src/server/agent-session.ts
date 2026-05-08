@@ -630,6 +630,32 @@ let inFlightToolCount = 0;
 // without this, isSessionBusy returns false in the gap and a fresh
 // enqueue would take the direct-send path, opening a new ordering bug.
 let promotedItemInFlight = false;
+// (v0.2.12 mid-turn injection restore) UUID of the queue item currently
+// yielded to the SDK CLI subprocess but not yet drained by AI. Set when
+// generator yields a queued mid-turn message; cleared when CLI emits
+// SDKUserMessageReplay (isReplay=true) confirming AI's next API call
+// will include the queued_command attachment, OR at turn-end as fallback
+// for turns that never hit a tool break (no replay opportunity).
+//
+// While inFlightToCliId !== null, additional mid-turn enqueues buffer
+// in pendingMidTurnQueue (still cancellable). Frontend hides the X
+// button on the in-flight item — its uuid has crossed the process
+// boundary into the CLI's commandQueue and there is no SDK API to
+// retract it. The "lockstep yield" pattern (one in-flight at a time)
+// keeps subsequent queue items cancellable until they are promoted.
+let inFlightToCliId: string | null = null;
+// (v0.2.12) Metadata for the currently in-flight queue item. We stash
+// messageText / attachments / requestId at yield time because the
+// MessageQueueItem closes over the generator and we no longer have
+// access to it when SDKUserMessageReplay arrives later. Used by
+// handleQueuedCommandReplay to build the user MessageWire that gets
+// pushed to messages[] and broadcast as queue:started.
+type InFlightMetadata = {
+  messageText: string;
+  attachments?: MessageWire['attachments'];
+  requestId?: string;
+};
+let inFlightMetadata: InFlightMetadata | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 // Pattern 3 §3.2.4 — incremental persistence cursor.
@@ -1058,43 +1084,14 @@ const pendingMidTurnQueue: Array<{
  * concern from the old design (double-delivery via stdin buffer + messageQueue)
  * no longer exists.
  */
-/**
- * (v0.2.11 cross-bugfix #142 review-fix #3) Cancellation checkpoint set.
- *
- * Holds queueIds whose owner asked for cancellation AFTER the item was
- * already promoted out of pendingMidTurnQueue — i.e. messageResolver
- * had already resolved with the item, generator was running its
- * turn-start setup (push messages → await persistMessagesToStorage)
- * but had not yet broadcast queue:started. The generator consults this
- * set in a checkpoint after the persist-await, and if a match is found,
- * rolls back the turn-start (splice messages[]) and re-enters the
- * while loop without yielding to SDK.
- *
- * Only added by cancelQueueItem (queueId path). cancelImRequest does
- * NOT add to this set — see review-fix-2 #3 for rationale (would leak
- * stale requestIds and false-cancel recycled IM ids). The generator
- * checkpoint defensively also matches against item.requestId in case a
- * future caller adds requestId tracking; today that branch is dead.
- *
- * (v0.2.11 review-fix-5 medium #1) Bounded by `CANCEL_INFLIGHT_CAP` —
- * a cancel that misses both queues marks an id that may never reach the
- * generator checkpoint (item never existed, or already in flight via
- * another path). Without a cap, repeated mis-clicks leak strings.
- * Set iteration order is insertion order, so dropping `values().next()`
- * evicts the oldest entry — a fine FIFO eviction policy.
- *
- * Cleared lazily by the generator on consumption (the matching id is
- * removed when the cancellation fires).
- */
-const cancelledInflightIds = new Set<string>();
-const CANCEL_INFLIGHT_CAP = 100;
-function markInflightCancel(id: string): void {
-  if (cancelledInflightIds.size >= CANCEL_INFLIGHT_CAP) {
-    const oldest = cancelledInflightIds.values().next().value;
-    if (oldest !== undefined) cancelledInflightIds.delete(oldest);
-  }
-  cancelledInflightIds.add(id);
-}
+// (v0.2.12) The cancelledInflightIds checkpoint set used by the deferred-yield
+// design (ce747cd2) is gone. With lockstep mid-turn injection, items are
+// either in messageQueue / pendingMidTurnQueue (cancellable by splice) or
+// already in CLI's commandQueue (uncancellable — frontend hides the X).
+// The "promoted but not yet yielded" race window the checkpoint guarded
+// against doesn't exist any more — promote and yield happen back-to-back
+// inside the same micro-task and there is no externally visible
+// cancellation surface in between.
 
 function rescuePendingToQueue(): void {
   if (pendingMidTurnQueue.length === 0) return;
@@ -1107,72 +1104,111 @@ function rescuePendingToQueue(): void {
 }
 
 /**
- * Promote the FIRST deferred mid-turn user message back into the delivery
- * queue once the prior turn has ended. Called from handleMessageComplete /
- * Stopped / Error after `isStreamingMessage` has been flipped to false.
+ * (v0.2.12) Lockstep yield: promote the next pendingMidTurnQueue item into
+ * CLI's commandQueue. Called from:
+ *   - handleQueuedCommandReplay (CLI confirmed AI saw the in-flight item
+ *     mid-turn): the in-flight slot just opened, hand the next over.
+ *   - handleMessageComplete/Stopped/Error (turn-end fallback for cases
+ *     where CLI drained queued commands at the do-while turn boundary
+ *     instead of mid-turn — no replay event fires there, but the
+ *     in-flight slot is freed and we still need to promote our pending).
  *
- * The promoted item is re-delivered via `wakeGenerator()` — the generator
- * is currently parked at `await waitForMessage()`, so the resolver fires
- * synchronously and the next iteration sees the item with isStreamingMessage
- * already false, falling through to the normal turn-start path (push to
- * messages[], broadcast queue:started, beginTurnAbort, yield to SDK).
- *
- * Only one item is promoted per turn boundary because each promoted item
- * starts a fresh turn — subsequent pending items wait for the next
- * turn-end. This matches the user-observable behaviour of "queued messages
- * are processed one by one in order" without the race-doomed shortcut of
- * yielding everything to SDK upfront.
- *
- * Replaces the old `flushPendingMidTurnQueue()` which pushed pending items
- * straight to `messages[]` while the SDK still owned the turn — that was
- * cosmetic only (SDK didn't actually process them until turn-end) and
- * required mid-turn cancel to be a no-op against SDK's already-yielded
- * input.
+ * Idempotent: bails when inFlightToCliId !== null (the slot is occupied)
+ * or pendingMidTurnQueue is empty.
  */
-function promotePendingMidTurnItem(): void {
+function promoteNextFromPending(): void {
+  if (inFlightToCliId !== null) return;
   if (pendingMidTurnQueue.length === 0) return;
-  // (v0.2.11 cross-bugfix #142 review-fix #1) DEFER promote to next tick.
-  //
-  // Why: handleMessageComplete is called from inside the SDK result handler.
-  // After it returns, the result handler can synchronously decide to
-  // resetSession() / recoverFromStaleSession() / setSessionModel() which
-  // call abortPersistentSession() — that flips shouldAbortSession=true and
-  // wakes the generator with null (so it returns). If we promote
-  // synchronously HERE, we resolve messageResolver with our pending item
-  // BEFORE the abort can fire, leaving the item in generator's closure
-  // (already-resumed but not yet yielded). The subsequent abort can't
-  // rescue it (rescuePendingToQueue only sees pendingMidTurnQueue, not
-  // generator's local item) and the item lands on a dying SDK subprocess.
-  //
-  // setTimeout(0) lets the synchronous result-handler tail run first,
-  // including any abort decision. If abort fired, we observe
-  // shouldAbortSession=true and skip — pending stays in
-  // pendingMidTurnQueue OR has already been moved to messageQueue by
-  // rescuePendingToQueue. Either way the item is preserved.
-  setTimeout(() => {
-    if (shouldAbortSession) {
-      console.log(`[agent] Promote skipped — session aborted in deferred-promote gap (${pendingMidTurnQueue.length} pending)`);
-      return;
-    }
-    if (pendingMidTurnQueue.length === 0) return;
-    // (v0.2.11 review-fix-3 medium #1) If the generator has already exited
-    // (no parked messageResolver), don't set the in-flight flag — there's
-    // no consumer to clear it later. wakeGenerator's else-branch would
-    // push to messageQueue, but a recovery session generator handles that
-    // case naturally; we don't need promotedItemInFlight in that flow.
-    if (!messageResolver) {
-      console.log('[agent] Promote skipped — generator not parked (already exited or busy); pending stays for recovery generator');
-      return;
-    }
-    const pending = pendingMidTurnQueue.shift()!;
-    // Mark promotion in-flight so isSessionBusy stays true through the
-    // generator's persist-await window. Cleared by the generator after
-    // item.resolve() (post-yield), on cancel-checkpoint rollback, and
-    // defensively in abortPersistentSession.
-    promotedItemInFlight = true;
-    console.log(`[agent] Promoting deferred mid-turn message: queueId=${pending.queueId} (pending remaining=${pendingMidTurnQueue.length})`);
-    wakeGenerator(pending.sourceItem);
-  }, 0);
+  if (shouldAbortSession) {
+    console.log(`[agent] Promote skipped — session aborting (${pendingMidTurnQueue.length} pending will be rescued)`);
+    return;
+  }
+  if (!messageResolver) {
+    console.log('[agent] Promote skipped — generator not parked; pending stays for recovery generator');
+    return;
+  }
+  const pending = pendingMidTurnQueue.shift()!;
+  const promotedText = typeof pending.userMessage.content === 'string'
+    ? pending.userMessage.content
+    : '';
+  inFlightToCliId = pending.queueId;
+  inFlightMetadata = {
+    messageText: promotedText,
+    attachments: pending.userMessage.attachments,
+    requestId: pending.sourceItem.requestId,
+  };
+  console.log(`[agent] Promoting next pending mid-turn message: queueId=${pending.queueId} (pending remaining=${pendingMidTurnQueue.length})`);
+  // Re-emit queue:added with isInFlight=true. Frontend's queue:added handler
+  // de-dups by queueId and updates the isInFlight flag in place — no separate
+  // event needed. Reusing the existing event keeps ALL_EVENTS count stable
+  // (SseConnection cleanup-invariant tests are sensitive to listener count
+  // shifts in the cancel-after-start-sse_proxy race).
+  broadcast('queue:added', {
+    queueId: pending.queueId,
+    messageText: promotedText.slice(0, 100),
+    isInFlight: true,
+  });
+  wakeGenerator(pending.sourceItem);
+}
+
+/**
+ * (v0.2.12) Handle SDKUserMessageReplay for our in-flight queued_command.
+ *
+ * CLI emits this event when it drains a queued_command attachment from
+ * its commandQueue mid-turn (claude-code/src/QueryEngine.ts:880). The
+ * event carries `attachment.source_uuid` (which we set as the SDKUserMessage
+ * uuid on yield) so we can match the replay back to inFlightToCliId.
+ *
+ * Receiving this means AI's NEXT API call will include the queued_command
+ * as a user-role attachment in its context — i.e. the message has crossed
+ * the "uncancellable" boundary. Time to:
+ *   1. Push it into messages[] (now visible in chat history)
+ *   2. Persist + broadcast queue:started so frontend renders the bubble
+ *      inline with the streaming assistant content (midTurnBreak split)
+ *   3. Clear inFlightToCliId and promote the next pending item, which
+ *      yields it to CLI for the next mid-turn drain
+ */
+async function handleQueuedCommandReplay(
+  sdkMessage: { uuid?: string }
+): Promise<void> {
+  const queueId = inFlightToCliId;
+  if (!queueId) return; // defensive — caller already matched
+  const meta = inFlightMetadata;
+  if (!meta) {
+    console.warn(`[agent] queued_command replay arrived but inFlightMetadata is null, queueId=${queueId}`);
+  }
+
+  const userMessage: MessageWire = {
+    id: String(messageSequence++),
+    role: 'user',
+    content: meta?.messageText ?? '',
+    timestamp: new Date().toISOString(),
+    attachments: meta?.attachments,
+    sdkUuid: sdkMessage.uuid,
+  };
+  messages.push(userMessage);
+  if (sdkMessage.uuid) {
+    currentSessionUuids.add(sdkMessage.uuid);
+    liveSessionUuids.add(sdkMessage.uuid);
+  }
+  await persistMessagesToStorage();
+
+  console.log(`[agent] queued_command replay consumed by AI: queueId=${queueId}`);
+  broadcast('queue:started', {
+    queueId,
+    midTurnBreak: true,
+    userMessage: {
+      id: userMessage.id,
+      role: userMessage.role,
+      content: userMessage.content,
+      timestamp: userMessage.timestamp,
+      attachments: userMessage.attachments,
+    },
+  });
+
+  inFlightToCliId = null;
+  inFlightMetadata = null;
+  promoteNextFromPending();
 }
 
 /** 中止持久 session：唤醒所有被阻塞的 Promise */
@@ -1189,22 +1225,10 @@ function abortPersistentSession(): void {
   // so other code can't bypass this teardown by setting the flag directly.
   // eslint-disable-next-line no-restricted-syntax
   shouldAbortSession = true;
-  // (v0.2.11 review-fix-4) DO NOT clear cancelledInflightIds here —
-  // doing so eats the cancel-wins signal in the cancel→abort race window:
-  // user cancels (mark added) → config restart calls abortPersistentSession
-  // → clear → generator checkpoint sees inflightCancel=false and takes
-  // the pure-abort restore branch, re-delivering a cancelled message via
-  // messageQueue. Earlier draft cleared the set to prevent "recycled id
-  // matches stale mark" — that risk is now zero because cancelledInflightIds
-  // only contains queueIds (randomUUID, never reused), since
-  // cancelImRequest no longer adds requestIds (review-fix-2 #3).
-  // The set is consumed lazily by the generator's checkpoint and stays
-  // bounded by the rate of cancel calls (one entry per cancel, removed
-  // when the matching item flows through the checkpoint).
-  // (v0.2.11 review-fix-3 medium #1) Defensive clear of in-flight flag.
-  // In case a promote setTimeout already shifted a pending item and set
-  // this flag but the generator is mid-flight (or never received it),
-  // abort fully resets the busy state. Recovery session starts clean.
+  // (v0.2.12) Clear in-flight CLI tracking — recovery session starts clean
+  // and any rescued pending items will be re-yielded by the new generator.
+  inFlightToCliId = null;
+  inFlightMetadata = null;
   promotedItemInFlight = false;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -3789,19 +3813,43 @@ export function buildClaudeSessionEnv(
   }
 
   // Windows: Set CLAUDE_CODE_GIT_BASH_PATH so SDK finds git-bash directly
-  // without relying on which("git") in PATH (which may be stale after NSIS install)
-  if (isWindows && !process.env.CLAUDE_CODE_GIT_BASH_PATH) {
-    const gitBashCandidates = [
-      resolve(winProgramFiles, 'Git', 'bin', 'bash.exe'),
-      resolve(winProgramFilesX86, 'Git', 'bin', 'bash.exe'),
-      ...(winLocalAppData ? [resolve(winLocalAppData, 'Programs', 'Git', 'bin', 'bash.exe')] : []),
-    ];
-    for (const candidate of gitBashCandidates) {
-      if (existsSync(candidate)) {
-        env.CLAUDE_CODE_GIT_BASH_PATH = candidate;
-        break;
+  // without relying on which("git") in PATH (which may be stale after NSIS install).
+  //
+  // Validate any inherited value: a non-empty CLAUDE_CODE_GIT_BASH_PATH from
+  // process.env may be a stale path from a prior Git install location persisted
+  // in HKCU\Environment (or set by another tool). If we trusted it blindly the
+  // SDK would try to spawn a non-existent bash.exe and the user would see
+  // "未安装 Git for Windows" even when Git is correctly installed.
+  //
+  // SDK 0.2.111+ overlays the subprocess env as `{...process.env, ...env}`,
+  // so a `delete env.X` would NOT unset the parent's stale inherited value
+  // in the subprocess (same shape as the proxy-var sealing pattern below).
+  // Always write the resolved path OR empty string — empty is treated as
+  // "not set" and lets the SDK fall back to PATH lookup.
+  if (isWindows) {
+    const inheritedGitBash = process.env.CLAUDE_CODE_GIT_BASH_PATH;
+    let resolvedGitBash = '';
+    if (inheritedGitBash && existsSync(inheritedGitBash)) {
+      resolvedGitBash = inheritedGitBash;
+    } else {
+      if (inheritedGitBash) {
+        console.warn(
+          `[env] Inherited CLAUDE_CODE_GIT_BASH_PATH points to a non-existent file (${inheritedGitBash}); ignoring and auto-detecting Git Bash.`,
+        );
+      }
+      const gitBashCandidates = [
+        resolve(winProgramFiles, 'Git', 'bin', 'bash.exe'),
+        resolve(winProgramFilesX86, 'Git', 'bin', 'bash.exe'),
+        ...(winLocalAppData ? [resolve(winLocalAppData, 'Programs', 'Git', 'bin', 'bash.exe')] : []),
+      ];
+      for (const candidate of gitBashCandidates) {
+        if (existsSync(candidate)) {
+          resolvedGitBash = candidate;
+          break;
+        }
       }
     }
+    env.CLAUDE_CODE_GIT_BASH_PATH = resolvedGitBash;
   }
 
   // Use provided providerEnv or fall back to currentProviderEnv
@@ -4470,12 +4518,80 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
-  // (v0.2.11 cross-bugfix) Promote one deferred mid-turn message back into
-  // the delivery queue. MUST run after isStreamingMessage = false so that
-  // when the generator wakes from waitForMessage() it takes the normal
-  // turn-start path (push to messages[], broadcast queue:started, yield)
-  // rather than re-buffering into pendingMidTurnQueue.
-  promotePendingMidTurnItem();
+  // Capture before fallback potentially re-arms it, so the post-teardown
+  // re-arm at the end of this function knows whether to do so.
+  let queuedFallbackKeepStreaming = false;
+  // (v0.2.12) Turn-end fallback for the lockstep yield.
+  //
+  // Two regimes the same `result` event covers:
+  //   (a) Natural completion: queue:started fallback so a UI pill that
+  //       was waiting on a never-fired mid-turn replay gets surfaced as
+  //       "AI saw it" right at turn boundary.
+  //   (b) Graceful interrupt (user pressed stop): the SDK fires `result`
+  //       with terminal_reason='aborted_streaming' which still routes
+  //       through handleMessageComplete. In this regime AI may not have
+  //       seen the in-flight item; treating it as queue:started would
+  //       show an unanswered user bubble in chat history. Drop it via
+  //       queue:cancelled instead — UI honesty matches handleMessageStopped.
+  //   (Codex review fix #2 v2)
+  if (inFlightToCliId !== null) {
+    const stale = inFlightToCliId;
+    const meta = inFlightMetadata;
+    inFlightToCliId = null;
+    inFlightMetadata = null;
+    if (isInterruptingResponse) {
+      broadcast('queue:cancelled', { queueId: stale });
+      console.log(`[agent] In-flight queue item ${stale} dropped at graceful interrupt result — broadcast queue:cancelled`);
+    } else if (meta) {
+      const userMessage: MessageWire = {
+        id: String(messageSequence++),
+        role: 'user',
+        content: meta.messageText,
+        timestamp: new Date().toISOString(),
+        attachments: meta.attachments,
+      };
+      messages.push(userMessage);
+      console.log(`[agent] queue:started fallback at turn-end (no mid-turn replay), queueId=${stale}`);
+      broadcast('queue:started', {
+        queueId: stale,
+        userMessage: {
+          id: userMessage.id,
+          role: userMessage.role,
+          content: userMessage.content,
+          timestamp: userMessage.timestamp,
+          attachments: userMessage.attachments,
+        },
+      });
+      // (v0.2.12 Codex review fix v3 #2) The fallback represents a brand-
+      // new SDK turn starting inside CLI via drainCommandQueue. Mark
+      // for a post-teardown re-arm of isStreamingMessage so isSessionBusy()
+      // still gates new direct-sends through the queue path during the
+      // gap before the new turn's first event reaches MyAgents.
+      queuedFallbackKeepStreaming = true;
+      // pendingRequestIds: queued item's requestId was pushed at yield
+      // time and remains in the FIFO behind msg1's; popPendingRequest()
+      // below pops msg1, leaving msg2 as new head — popped on its own
+      // result. No push needed.
+    }
+  }
+  // (v0.2.12 Codex review fix v2 #1) DEFER promote to next macrotask.
+  //
+  // handleMessageComplete is called from inside the SDK result handler.
+  // After it returns, the result handler can synchronously decide to
+  // resetSession() / setSessionModel() / hasDeferredRestart() — any of
+  // those calls abortPersistentSession() which flips shouldAbortSession
+  // and resolves the generator with null. If we promote synchronously,
+  // we resolve messageResolver with our pending item BEFORE the abort
+  // fires, leaving the item in generator's closure (already-resumed but
+  // not yet yielded). abortPersistentSession's rescue can't see it
+  // (rescuePendingToQueue only sees pendingMidTurnQueue, not generator's
+  // local item) and the item lands on a dying SDK subprocess.
+  //
+  // setTimeout(0) lets the result-handler tail run first, including any
+  // abort decision. If abort fired, promoteNextFromPending observes
+  // shouldAbortSession=true and skips — pending stays put OR has been
+  // moved to messageQueue by rescuePendingToQueue. Either way preserved.
+  setTimeout(() => promoteNextFromPending(), 0);
   // Pattern 1 follow-up: turn finished cleanly — drop the registration
   // without aborting. The next turn will register a fresh controller.
   if (sessionId) endTurnAbort(sessionId);
@@ -4554,13 +4670,32 @@ function handleMessageComplete(): void {
     model: currentTurnUsage.model,
     modelUsage: currentTurnUsage.modelUsage,
   }, currentTurnToolCount, durationMs).catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
+
+  // (v0.2.12 Codex review fix v3 #2 follow-up) Re-arm streaming flag for
+  // the queued fallback case AFTER all teardown has run, so endTurnAbort
+  // / clearAmbientLogContextField don't undo what we set up. The new
+  // turn driven by CLI's drainCommandQueue will re-emit a `result` of
+  // its own; isStreamingMessage will flip back to false there.
+  if (queuedFallbackKeepStreaming) {
+    isStreamingMessage = true;
+  }
 }
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
-  // (v0.2.11 cross-bugfix) Promote next deferred mid-turn item — same
-  // ordering as handleMessageComplete (must follow the flag flip).
-  promotePendingMidTurnItem();
+  // (v0.2.12 Codex review fix #2) On interrupt/abort the in-flight queue
+  // item is dropped — broadcast queue:cancelled so the frontend can
+  // clear the pill. See handleMessageComplete for the matching
+  // graceful-interrupt branch.
+  if (inFlightToCliId !== null) {
+    const droppedQueueId = inFlightToCliId;
+    inFlightToCliId = null;
+    inFlightMetadata = null;
+    broadcast('queue:cancelled', { queueId: droppedQueueId });
+    console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on stop — broadcast queue:cancelled`);
+  }
+  // Defer promote to next macrotask — abortPersistentSession may follow.
+  setTimeout(() => promoteNextFromPending(), 0);
   // Pattern 1 follow-up: turn ended (interrupted). Drop the registration.
   // If interruptCurrentResponse drove the stop it already abort()ed the
   // controller; this endTurn is the idempotent cleanup of the slot.
@@ -4612,11 +4747,17 @@ function handleMessageStopped(): void {
 
 function handleMessageError(error: string): void {
   isStreamingMessage = false;
-  // (v0.2.11 cross-bugfix) Promote next deferred mid-turn item — same
-  // ordering as handleMessageComplete (must follow the flag flip). Promoting
-  // even on error is desirable: the user's queued follow-up should still
-  // be delivered to the (recovered) session, not silently dropped.
-  promotePendingMidTurnItem();
+  // (v0.2.12 Codex review fix #2) Drop the in-flight item on error and
+  // surface queue:cancelled — see handleMessageStopped for rationale.
+  if (inFlightToCliId !== null) {
+    const droppedQueueId = inFlightToCliId;
+    inFlightToCliId = null;
+    inFlightMetadata = null;
+    broadcast('queue:cancelled', { queueId: droppedQueueId });
+    console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on error — broadcast queue:cancelled`);
+  }
+  // Defer promote to next macrotask — abortPersistentSession may follow.
+  setTimeout(() => promoteNextFromPending(), 0);
   // Pattern 1 follow-up: turn ended due to error. Abort the turn signal so
   // any in-flight tool fetches release immediately rather than waiting on
   // their own per-call timeouts. Ignored if no turn is registered.
@@ -5620,6 +5761,15 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
 export type EnqueueResult = {
   queued: boolean;   // true if message was queued (not immediately processed)
   queueId?: string;  // queue item ID, present when queued=true
+  /**
+   * (v0.2.12) When queued=true, indicates whether this item became the
+   * in-flight one (yielded immediately to CLI subprocess) or stayed in
+   * pendingMidTurnQueue (still cancellable). Frontend uses this to set
+   * the initial `isInFlight` flag on the optimistic queue pill so the
+   * X cancel button visibility matches the real backend state from the
+   * very first paint, before the SSE `queue:added` round-trip completes.
+   */
+  isInFlight?: boolean;
   error?: string;    // present when queue is full or other rejection
 };
 
@@ -6038,9 +6188,10 @@ export async function enqueueUserMessage(
   // the message to SDK stdin immediately (subprocess reads at breakpoints).
   if (isSessionBusy) {
     // Backend queue limit (defense-in-depth — frontend also enforces limit)
-    // Count both messageQueue (waiting) and pendingMidTurnQueue (yielded but not yet flushed)
+    // Count messageQueue + pendingMidTurnQueue + the in-flight slot.
     const MAX_QUEUE_SIZE = 10;
-    if (messageQueue.length + pendingMidTurnQueue.length >= MAX_QUEUE_SIZE) {
+    const inFlightCount = inFlightToCliId !== null ? 1 : 0;
+    if (messageQueue.length + pendingMidTurnQueue.length + inFlightCount >= MAX_QUEUE_SIZE) {
       return { queued: false, error: `Queue full (max ${MAX_QUEUE_SIZE})` };
     }
     const queueItem: MessageQueueItem = {
@@ -6052,11 +6203,52 @@ export async function enqueueUserMessage(
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
       requestId,
     };
-    // wakeGenerator delivers directly if generator is at waitForMessage (messageResolver set),
-    // or buffers in messageQueue if generator is suspended at yield (SDK hasn't called next() yet).
-    wakeGenerator(queueItem);
-    console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
-    broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
+
+    // (v0.2.12 mid-turn injection) Lockstep yield. Only one queued message
+    // lives in CLI's commandQueue at a time so subsequent items stay
+    // cancellable in pendingMidTurnQueue until this one is consumed
+    // (signalled by SDKUserMessageReplay) and we promote the next.
+    if (inFlightToCliId === null) {
+      // No in-flight queue item — this becomes the in-flight one. Yield
+      // immediately so CLI receives it and the next mid-turn drain
+      // (query.ts:1570 at any tool break) attaches it to the model's
+      // context. Mark inFlightToCliId BEFORE wakeGenerator so any
+      // concurrent enqueue arriving in the same micro-task takes the
+      // buffer path.
+      inFlightToCliId = queueId;
+      inFlightMetadata = {
+        messageText: trimmed,
+        attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+        requestId,
+      };
+      wakeGenerator(queueItem);
+      console.log(`[agent] Message queued mid-turn (in-flight to CLI): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
+      broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: true });
+    } else {
+      // Another item is in-flight to CLI. Buffer this one. It stays
+      // fully cancellable (splice from pendingMidTurnQueue) until promoted
+      // by handleQueuedCommandReplay or a turn-end fallback.
+      const userMessage: MessageWire = {
+        id: String(messageSequence++),
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date().toISOString(),
+        attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+      };
+      pendingMidTurnQueue.push({
+        queueId,
+        userMessage: {
+          id: userMessage.id,
+          role: userMessage.role,
+          content: userMessage.content,
+          timestamp: userMessage.timestamp,
+          attachments: userMessage.attachments,
+        },
+        sourceItem: queueItem,
+      });
+      console.log(`[agent] Message queued mid-turn (pending — in-flight slot busy): queueId=${queueId} requestId=${requestId ?? '-'} (pending=${pendingMidTurnQueue.length})`);
+      broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: false });
+    }
 
     // Safety net: if message was queued because shouldAbortSession is true but no session
     // or pre-warm timer exists to process it, schedule recovery. This prevents orphaned
@@ -6065,7 +6257,10 @@ export async function enqueueUserMessage(
       console.warn('[agent] Safety net: queued message during abort with no pending recovery, scheduling pre-warm');
       schedulePreWarm();
     }
-    return { queued: true, queueId };
+    // (v0.2.12) inFlightToCliId === queueId only when this enqueue took the
+    // immediate-yield path. Frontend uses this to set the optimistic pill's
+    // isInFlight flag from the very first paint, before the SSE round-trip.
+    return { queued: true, queueId, isInFlight: inFlightToCliId === queueId };
   }
 
   // Direct send path: push user message to messages[] and broadcast immediately
@@ -6321,20 +6516,14 @@ export async function cancelImRequest(
     console.log(`[agent] cancelImRequest requestId=${requestId} mode=queued`);
     return { aborted: true, mode: 'queued' };
   }
-  // (v0.2.11 cross-bugfix #142) Try pendingMidTurnQueue — buffered by the
-  // generator awaiting turn-end, NOT yet yielded to SDK. Removing the entry
-  // is a real cancel; promote-on-turn-end will skip it.
+  // (v0.2.12) Try pendingMidTurnQueue — buffered while another item is
+  // in-flight to CLI. Never crossed the process boundary — splice = real cancel.
   const pmIdx = pendingMidTurnQueue.findIndex(p => p.sourceItem.requestId === requestId);
   if (pmIdx >= 0) {
     const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
     removed.sourceItem.resolve();
     broadcast('queue:cancelled', { queueId: removed.queueId });
-    console.log(`[agent] cancelImRequest requestId=${requestId} mode=pending-mid-turn (deferred yield — SDK never received it)`);
-    // No interrupt needed: this requestId is not the active turn driver
-    // (the active driver lives at pendingRequestIds[0] and is handled by
-    // the running branch below). With deferred-yield, a pending mid-turn
-    // entry by definition hasn't been pushed to pendingRequestIds yet
-    // either, so there is no head-position case to handle here.
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=pending-mid-turn (never yielded to CLI)`);
     return { aborted: true, mode: 'queued' };
   }
   // Active turn? (queue head matches)
@@ -6343,80 +6532,67 @@ export async function cancelImRequest(
     await interruptCurrentResponse(reason);
     return { aborted: true, mode: 'running' };
   }
-  // (v0.2.11 cross-bugfix #142 review-fix-2 #3) IM cancel returns 'unknown'
-  // here rather than marking inflight. Earlier draft added requestId to
-  // cancelledInflightIds for any registry-known requestId, but the consume
-  // path (generator pre-yield checkpoint) only fires on queued items, so
-  // unknown-but-registered requestIds (already-completed, registry not yet
-  // unregistered, or direct-send not yet at queue point) would leak into
-  // the set permanently. If an IM client recycles a requestId, the
-  // recycled message would get falsely cancelled at its first checkpoint.
-  // The actual user-facing race window for IM cancel-during-promote is
-  // narrow and a one-off "cancel failed" UI message is preferable to a
-  // silent false-cancel of a different message later.
+  // (v0.2.12) Either the requestId is in-flight to CLI (uncancellable —
+  // its content already crossed into CLI's commandQueue), or the request
+  // doesn't exist on this side. Both surface as 'unknown' so the IM
+  // client can show "cancel failed" honestly rather than a false success.
   return { aborted: false, mode: 'unknown' };
 }
 
 /**
  * Cancel a queued message by its queueId.
  * Returns the original message text (for restoring to input box) or null if not found.
+ *
+ * (v0.2.12) Three queue locations to check:
+ *   - messageQueue: not yet consumed by generator (no active turn). Splice → done.
+ *   - pendingMidTurnQueue: buffered while another item is in-flight to CLI.
+ *     Splice → done. Still cancellable because it never crossed the process
+ *     boundary into CLI's commandQueue.
+ *   - inFlightToCliId match: the item is already in CLI's commandQueue and
+ *     potentially already drained into AI's context. SDK exposes no API to
+ *     retract a queued_command. Frontend hides the X button on the in-flight
+ *     pill so this branch is rarely reached; we return null to signal "no
+ *     cancel". UI invariant: if the X is visible, cancellation succeeds.
  */
 export function cancelQueueItem(queueId: string): string | null {
-  const index = messageQueue.findIndex(item => item.id === queueId);
-  if (index === -1) {
-    // (v0.2.11 cross-bugfix #142) Pending mid-turn (deferred-yield buffer).
-    // Was directly delivered to generator via wakeGenerator's fast-path
-    // while the prior turn was streaming, then BUFFERED by the generator
-    // awaiting turn-end (NOT yielded to SDK). Splicing here is now a real
-    // cancel: promotePendingMidTurnItem at next turn-end won't see this
-    // entry, so SDK will never receive the message.
-    const pmIdx = pendingMidTurnQueue.findIndex(p => p.queueId === queueId);
-    if (pmIdx === -1) {
-      // (v0.2.11 cross-bugfix #142 review-fix #3) Promote-then-cancel race.
-      // The item was already shifted out of pendingMidTurnQueue by
-      // promotePendingMidTurnItem, and the generator may currently be in
-      // turn-start setup (push messages → await persistMessagesToStorage →
-      // broadcast queue:started → push pendingRequest → yield). Mark the
-      // queueId so the generator's pre-yield checkpoint catches it and
-      // rolls back without yielding to SDK.
-      //
-      // A spurious mark for a never-existed queueId is harmless — it sits
-      // in the set unused. The set is cleared on session abort (defensive)
-      // and consumed by the generator on cancellation match.
-      markInflightCancel(queueId);
-      broadcast('queue:cancelled', { queueId });
-      console.log(`[agent] Queue item ${queueId} marked cancelled-inflight (already promoted; generator pre-yield checkpoint will catch it)`);
-      return null;
-    }
+  // 1. messageQueue (no active turn — generator about to pull)
+  const mqIdx = messageQueue.findIndex(item => item.id === queueId);
+  if (mqIdx >= 0) {
+    const [item] = messageQueue.splice(mqIdx, 1);
+    item.resolve();
+    broadcast('queue:cancelled', { queueId });
+    console.log(`[agent] Queue item ${queueId} cancelled from messageQueue (wasQueued=${item.wasQueued})`);
+    return item.messageText;
+  }
+
+  // 2. pendingMidTurnQueue (buffered, in-flight slot occupied by another item)
+  const pmIdx = pendingMidTurnQueue.findIndex(p => p.queueId === queueId);
+  if (pmIdx >= 0) {
     const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
-    // Resolve the sourceItem promise so any awaiter unblocks. wasQueued
-    // items have a no-op resolve, but stay symmetric with the messageQueue
-    // branch below in case a future enqueue path uses a real awaiter.
     removed.sourceItem.resolve();
     broadcast('queue:cancelled', { queueId });
-    console.log(`[agent] Queue item ${queueId} cancelled from pendingMidTurnQueue (deferred yield — SDK never received it)`);
-    // (v0.2.11 review-fix-2 #4) handleMessageComplete may have skipped the
-    // idle transition because pendingMidTurnQueue had this item. Now that
-    // we've removed it, drop to idle if no other work remains.
+    console.log(`[agent] Queue item ${queueId} cancelled from pendingMidTurnQueue (never yielded to CLI)`);
     if (
       messageQueue.length === 0
       && pendingMidTurnQueue.length === 0
+      && inFlightToCliId === null
       && !isTurnInFlight()
-      && !promotedItemInFlight
     ) {
       setSessionState('idle');
     }
     return typeof removed.userMessage.content === 'string' ? removed.userMessage.content : '';
   }
 
-  const [item] = messageQueue.splice(index, 1);
-  // Only resolve if this was a non-blocking queued item (wasQueued: true has no-op resolve).
-  // For blocking items (wasQueued: false), resolve would unblock enqueueUserMessage's await,
-  // but the message was removed from the queue — messageGenerator won't find it, which is safe.
-  item.resolve();
-  broadcast('queue:cancelled', { queueId });
-  console.log(`[agent] Queue item ${queueId} cancelled (wasQueued=${item.wasQueued})`);
-  return item.messageText;
+  // 3. In-flight to CLI — cannot cancel. Frontend should not have offered
+  //    the X button for this item, but if it raced and asked anyway, we
+  //    refuse the cancel honestly rather than fake a success.
+  if (inFlightToCliId === queueId) {
+    console.log(`[agent] Queue item ${queueId} cancel rejected — already in-flight to CLI (uncancellable)`);
+    return null;
+  }
+
+  console.log(`[agent] Queue item ${queueId} not found — already consumed or never existed`);
+  return null;
 }
 
 /**
@@ -6439,8 +6615,16 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   const pmIdx = mqIdx === -1
     ? pendingMidTurnQueue.findIndex(p => p.queueId === queueId)
     : -1;
+  // (v0.2.12 Codex review fix #3) The in-flight item still shows the ▷
+  // play button in the UI ("已发送但还没被 AI 看见 — 我想立刻处理"). It
+  // doesn't live in either queue any more (already yielded to CLI), so
+  // the legacy "move to front of queue + interrupt" path returns 404
+  // for it. Instead, just force the current turn to wind down so CLI's
+  // post-abort drainCommandQueue immediately processes whatever's
+  // in commandQueue (including our in-flight item).
+  const isInFlight = mqIdx === -1 && pmIdx === -1 && inFlightToCliId === queueId;
 
-  if (mqIdx === -1 && pmIdx === -1) return false;
+  if (mqIdx === -1 && pmIdx === -1 && !isInFlight) return false;
 
   // Move target to front of its queue so it's first when the turn ends.
   if (mqIdx > 0) {
@@ -7053,6 +7237,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         askUserQuestion: { previewFormat: 'html' as const },
       },
       mcpServers: sdkMcpServersInitial,
+      // (v0.2.12) Enable --replay-user-messages so CLI emits SDKUserMessageReplay
+      // (isReplay=true) when it drains a mid-turn queued_command attachment from
+      // its commandQueue into the model's context. We use this signal to know
+      // when our in-flight queue item has been delivered to AI and it's safe to
+      // promote the next pending item. Without this flag the CLI silently
+      // consumes queued commands and we have no mid-turn promote signal.
+      extraArgs: { 'replay-user-messages': null } as Record<string, string | null>,
       // Sub-agents: inject custom agent definitions if configured
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       // Each sub-agent's `model` runs through applyContextWindowSuffix so a sub-agent
@@ -7971,6 +8162,43 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'user') {
+        // (v0.2.12 mid-turn injection) SDKUserMessageReplay handling.
+        //
+        // CLI subprocess emits a user message with isReplay=true when it
+        // drains a queued_command attachment from its commandQueue
+        // mid-turn (claude-code/src/QueryEngine.ts:880). The replay's
+        // uuid carries our queueItem.id (we stamped it on yield), so a
+        // match against inFlightToCliId means our in-flight item just
+        // crossed into the model's context — time to surface it visually
+        // and promote the next pending item.
+        const isReplay = (sdkMessage as { isReplay?: boolean }).isReplay === true;
+        if (isReplay && sdkMessage.uuid && sdkMessage.uuid === inFlightToCliId) {
+          await handleQueuedCommandReplay(sdkMessage);
+          continue;
+        }
+        if (isReplay) {
+          // (v0.2.12 Codex review fix #4) Other replay flavours
+          // (initial-message ack, batched-message ack, local-command echo).
+          // These don't represent new conversation turns, but the replay's
+          // uuid is the canonical SDK uuid for our previously-pushed user
+          // message. We MUST run the same sdkUuid-assignment loop the
+          // non-replay branch uses, otherwise rewindFiles / fork / forkSession
+          // checkpoint anchors break for those messages — `currentSessionUuids`
+          // alone is insufficient because rewindSession matches by
+          // `messages[i].sdkUuid`.
+          if (sdkMessage.uuid) {
+            currentSessionUuids.add(sdkMessage.uuid);
+            liveSessionUuids.add(sdkMessage.uuid);
+            for (let i = messages.length - 1; i >= 0; i--) {
+              if (messages[i].role === 'user' && !messages[i].sdkUuid) {
+                messages[i].sdkUuid = sdkMessage.uuid;
+                broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
+                break;
+              }
+            }
+          }
+          continue;
+        }
         // Track SDK user UUID — only for non-synthetic messages
         if (!(sdkMessage as { isSynthetic?: boolean }).isSynthetic && sdkMessage.uuid) {
           currentSessionUuids.add(sdkMessage.uuid);
@@ -8667,6 +8895,24 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       isStreamingMessage = false;
     }
 
+    // (v0.2.12 latent bug fix — Codex finding) Rescue any pending mid-turn
+    // items into messageQueue so the recovery generator picks them up.
+    // Without this, an unexpected SDK exit (subprocess crash, error
+    // surfaced after handleMessageError but BEFORE abortPersistentSession's
+    // own rescue) leaves pendingMidTurnQueue items orphaned: the new
+    // generator only consumes from messageQueue, the items would never be
+    // delivered. abortPersistentSession's rescue covers the explicit-abort
+    // path; this finally-block rescue is the catch-all for every other
+    // exit shape (catch block didn't run abortPersistentSession, for-await
+    // throws on transport error, etc.). Also clear in-flight CLI tracking —
+    // the CLI subprocess is gone, those uuids are dead.
+    if (pendingMidTurnQueue.length > 0) {
+      console.log(`[agent] finally: rescuing ${pendingMidTurnQueue.length} pending mid-turn item(s) into messageQueue`);
+      rescuePendingToQueue();
+    }
+    inFlightToCliId = null;
+    inFlightMetadata = null;
+
     // Queue lifecycle invariant: messageQueue survives session restarts by default.
     // Any drain decision belongs to the caller that triggered the exit, not here:
     //   - interruptCurrentResponse (stop button): drains only when called with no
@@ -8763,31 +9009,30 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 }
 
 async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
-  // Defer-mid-turn-yield 模式（v0.2.11 cross-bugfix #142）：
+  // (v0.2.12) Mid-turn injection restored.
   //
-  // Earlier ("yield-and-ready") immediately yielded the next queued user
-  // message to SDK stdin even while the prior turn was still streaming.
-  // That made cancel race-doomed: enqueue → wakeGenerator → yield happened
-  // synchronously within ~1ms, far less than any user could click ×.
-  // Once a message is yielded, SDK has written the JSON line to the
-  // subprocess stdin and there is NO API to "ignore this user message" —
-  // the cancel only deletes the UI bubble while the SDK keeps the input.
+  // Yield queued messages immediately so the CLI subprocess receives them
+  // and its mid-turn drain (claude-code/src/query.ts:1570 —
+  // getCommandsByMaxPriority('next') at every tool break) can attach them
+  // as queued_command attachments to the model's next API call. AI sees
+  // mid-turn user input and can change direction.
   //
-  // Now: when isStreamingMessage is true, we BUFFER the queued item in
-  // `pendingMidTurnQueue` and return to waitForMessage() instead of
-  // yielding. The buffered item is promoted back into the delivery queue
-  // by `promotePendingMidTurnItem()` from handleMessageComplete /
-  // Stopped / Error — at which point isStreamingMessage is false and the
-  // generator falls through to the normal turn-start path. Cancel from
-  // pendingMidTurnQueue is now a real cancel (SDK never saw the message).
+  // Cancel safety is handled at the enqueue layer, NOT by deferring the
+  // yield. While inFlightToCliId !== null, fresh queue items are buffered
+  // in pendingMidTurnQueue (cancellable, never crossed the process
+  // boundary) and only yielded after the current in-flight item gets a
+  // SDKUserMessageReplay (isReplay=true) confirming CLI consumption.
+  // Frontend hides the X button on the in-flight item — its uuid has
+  // already entered CLI's commandQueue and there is no SDK API to
+  // retract it.
   //
-  // Observed in 2026-05-07 logs: SDK takes ~35s from yield-time to LLM
-  // dispatch (it queues stdin until turn-end anyway), so deferring yield
-  // until turn-end loses no functional capability — the LLM was never
-  // going to process the new message during the ongoing turn.
+  // Each yielded SDKUserMessage carries `uuid: item.id`, which CLI
+  // surfaces as `attachment.source_uuid` in the replay event so we can
+  // match the replay back to our queue item and promote the next
+  // pending one.
   //
   // Exit signal: waitForMessage() returns null (via abortPersistentSession).
-  console.log('[messageGenerator] Started (persistent mode, mid-turn defer enabled)');
+  console.log('[messageGenerator] Started (persistent mode, mid-turn injection enabled)');
 
   while (true) {
     // 等待队列中的消息（事件驱动，无轮询）
@@ -8797,47 +9042,12 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       return; // generator return → SDK endInput() → stdin EOF → subprocess 退出
     }
 
-    // Mid-turn defer: a queued message arriving while the prior turn is
-    // still streaming gets buffered, NOT yielded. The promote-on-turn-end
-    // path will re-deliver it via wakeGenerator after isStreamingMessage
-    // flips to false. Note this only applies to wasQueued items — direct-
-    // send items (wasQueued=false) only arrive when no turn is in flight,
-    // so they always fall through to normal yield.
-    if (isStreamingMessage && item.wasQueued) {
-      const userMessage: MessageWire = {
-        id: String(messageSequence++),
-        role: 'user',
-        content: item.messageText,
-        timestamp: new Date().toISOString(),
-        attachments: item.attachments,
-      };
-      pendingMidTurnQueue.push({
-        queueId: item.id,
-        userMessage: {
-          id: userMessage.id,
-          role: userMessage.role,
-          content: userMessage.content,
-          timestamp: userMessage.timestamp,
-          attachments: userMessage.attachments,
-        },
-        sourceItem: item,
-      });
-      console.log(`[messageGenerator] Deferring mid-turn message, queueId=${item.id} requestId=${item.requestId ?? '-'} (will yield at turn-end)`);
-      // Loop back to waitForMessage(). The pending item stays put until
-      // promotePendingMidTurnItem() re-delivers it after the current turn
-      // ends — or until cancelQueueItem / cancelImRequest splices it out.
-      continue;
-    }
-
     // Transition from pre-warm to active when processing a queued message.
-    // This handles a race: if enqueueUserMessage was called during session abort
-    // (shouldAbortSession=true), the pre-warm→active transition was skipped there.
-    // A new session then starts in pre-warm mode, and the messageGenerator picks up
-    // the queued message — but nobody transitions isPreWarming to false. Setting it
-    // false HERE ensures that when system_init arrives from the SDK (after this yield),
-    // it goes through the direct-broadcast path (line ~4256) instead of being buffered.
-    // Without this, the frontend never receives system_init, so currentSessionIdRef
-    // stays as the pending placeholder and title generation sends the wrong sessionId → 404.
+    // Same race-handling as before: if enqueueUserMessage was called during
+    // session abort (shouldAbortSession=true), the pre-warm→active transition
+    // was skipped there. Setting it false HERE ensures that when system_init
+    // arrives from the SDK (after this yield), it goes through the direct-
+    // broadcast path instead of being buffered.
     if (isPreWarming) {
       isPreWarming = false;
       if (systemInitInfo) {
@@ -8851,10 +9061,15 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       console.log(`[agent] pre-warm → active (from queued message), sessionRegistered=${sessionRegistered}`);
     }
 
-    // Normal turn start: push user message to messages[], persist, broadcast.
-    // (Mid-turn injection no longer takes a separate code path — by the time
-    // we reach here the prior turn ended and isStreamingMessage was reset.)
-    if (item.wasQueued) {
+    // Direct-send items (wasQueued=false): no turn in flight when enqueued.
+    // Push user message to messages[], persist, register turn-scoped state.
+    //
+    // wasQueued=true items go a different path: their messages[] push +
+    // queue:started broadcast happens later in handleQueuedCommandReplay()
+    // (or the turn-end fallback in handleMessageComplete) when the CLI
+    // confirms AI saw the message. Until then they live as an "in-flight"
+    // pill in the frontend queue panel.
+    if (!item.wasQueued) {
       const userMessage: MessageWire = {
         id: String(messageSequence++),
         role: 'user',
@@ -8864,83 +9079,10 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       };
       messages.push(userMessage);
       await persistMessagesToStorage();
-
-      // (v0.2.11 cross-bugfix #142 review-fix #3) Pre-broadcast cancel
-      // checkpoint. The persist-await above is the longest gap between
-      // promote and yield (tens of ms — file lock + JSONL write); a
-      // cancellation arriving in this window won't find the item in
-      // messageQueue or pendingMidTurnQueue (already shifted) and would
-      // otherwise reach SDK. Catch it here BEFORE we broadcast
-      // queue:started: rolling back is clean because nothing user-visible
-      // has hit the wire yet.
-      const inflightCancel = cancelledInflightIds.has(item.id)
-        || (item.requestId !== undefined && cancelledInflightIds.has(item.requestId));
-      // (v0.2.11 review-fix-3 high) Cancel WINS over abort. If the user
-      // explicitly cancelled this queueId, we already broadcast
-      // queue:cancelled to the frontend (and a UI bubble is gone). Even
-      // if abortPersistentSession ran in the same window and would
-      // otherwise restore the item to messageQueue for recovery, we MUST
-      // skip restore — otherwise the recovery session would re-deliver a
-      // message the user explicitly cancelled, and the UI shows
-      // "cancelled" while the AI still answers it. Only treat
-      // shouldAbortSession as a restore-trigger when there is NO
-      // cancellation intent.
-      const sessionAborted = shouldAbortSession;
-      if (inflightCancel || sessionAborted) {
-        cancelledInflightIds.delete(item.id);
-        if (item.requestId !== undefined) cancelledInflightIds.delete(item.requestId);
-        // Splice the just-pushed user message out of messages[]. Re-persist
-        // fire-and-forget so the on-disk record stays consistent.
-        const idx = messages.findIndex(m => m.id === userMessage.id);
-        if (idx >= 0) messages.splice(idx, 1);
-        void persistMessagesToStorage().catch(() => { /* ignored — same as elsewhere */ });
-        item.resolve();
-        promotedItemInFlight = false;
-        if (inflightCancel) {
-          // Cancel-wins path: do NOT restore to messageQueue, do NOT
-          // re-broadcast queue:cancelled (cancelQueueItem already did).
-          console.log(`[messageGenerator] Cancellation caught at pre-broadcast checkpoint, queueId=${item.id} requestId=${item.requestId ?? '-'}${sessionAborted ? ' (abort also pending — cancel takes precedence)' : ''}`);
-          // (v0.2.11 review-fix-2 #4) Drop to idle if all queues empty.
-          if (
-            messageQueue.length === 0
-            && pendingMidTurnQueue.length === 0
-            && !isTurnInFlight()
-          ) {
-            setSessionState('idle');
-          }
-          // If abort is also pending, exit generator now (no point trying
-          // to promote the next pending — it'll be rescued shortly).
-          if (sessionAborted) return;
-          // Otherwise try the next pending item.
-          promotePendingMidTurnItem();
-          continue;
-        }
-        // Pure abort path (no inflight cancel mark): preserve the user's
-        // text for the recovery session.
-        messageQueue.unshift(item);
-        console.warn(`[messageGenerator] Session abort detected at pre-broadcast checkpoint, restoring queueId=${item.id} to messageQueue and exiting generator`);
-        return; // exit generator → SDK closes via endInput
-      }
-
       resetTurnUsage();
       currentTurnStartTime = Date.now();
-      // Pattern 1 follow-up: register a fresh turn-scoped AbortController.
-      // Tool fetches and other in-flight async work in our Node process pull
-      // this signal as their parent via `getCurrentTurnSignal()`. On stop
-      // (interruptCurrentResponse) we abort it; on success we drop it via
-      // endTurn() inside handleMessageComplete/Stopped/Error.
       if (sessionId) beginTurnAbort(sessionId);
-      // Pattern 6 (SDK turn boundary): stamp `turnId` ambient so all
-      // logs emitted between now and handleMessageComplete()/Stopped/
-      // handleAbort carry it. Ambient (not ALS) because the persistent
-      // messageGenerator yields back into SDK code outside our wrapper
-      // function, so call-stack ALS would lose the frame on resume.
-      // Cleared in handleMessageComplete()/handleMessageStopped()/
-      // handleAbort() below.
       const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
-      // Pattern 6 (cross-owner contamination fix): key the ambient slot by
-      // sessionId so two concurrent turns on different owners (Tab/IM/Cron)
-      // can each carry their own turnId without clobbering each other.
       setAmbientLogContext(sessionId, { turnId, sessionId });
       broadcast('queue:started', {
         queueId: item.id,
@@ -8952,38 +9094,56 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
           attachments: userMessage.attachments,
         },
       });
+    } else if (inFlightToCliId === null) {
+      // (v0.2.12 Codex review fix #1) wasQueued item arrived without an
+      // existing in-flight tracker. Two paths reach here:
+      //   - Recovery: finally-block rescue moved a pendingMidTurnQueue item
+      //     into messageQueue front; the new generator pulls it but
+      //     enqueueUserMessage's lockstep tracker (inFlightToCliId) was
+      //     reset on the prior session's exit.
+      //   - Direct push to messageQueue with wasQueued=true (defensive —
+      //     no current call site does this, but the type allows it).
+      // Either way we must register this item as in-flight so the
+      // SDKUserMessageReplay handler can match it back, and the UI can
+      // be eventually resolved via either replay or turn-end fallback.
+      inFlightToCliId = item.id;
+      inFlightMetadata = {
+        messageText: item.messageText,
+        attachments: item.attachments,
+        requestId: item.requestId,
+      };
+      // Re-emit queue:added with isInFlight=true so the frontend pill's
+      // X cancel button hides — recovery items are uncancellable just
+      // like the normal in-flight ones (the new yield below crosses the
+      // process boundary into CLI's commandQueue immediately).
+      broadcast('queue:added', {
+        queueId: item.id,
+        messageText: item.messageText.slice(0, 100),
+        isInFlight: true,
+      });
+      console.log(`[messageGenerator] Recovery path: wasQueued item ${item.id} adopted as in-flight (rescue or messageQueue push)`);
     }
 
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.
-    // SDK output continues to be tagged with the queue HEAD until the SDK
-    // emits a `result` boundary, at which point handleMessageComplete pops
-    // the head and the next pending request becomes head.
     pushPendingRequest(item.requestId);
 
-    // Modality re-check at dequeue. The earlier filter in enqueueUserMessage
-    // ran against the model active at enqueue time. If the user switched to a
-    // text-only model in the gap before this dequeue (rare but real — e.g.
-    // pasted image + text on Claude, then realized DeepSeek was the
-    // intended target, switched, AI was still mid-turn so message stayed
-    // queued), the baked content blocks would carry image blocks the new
-    // model can't accept. Strip last-minute against `currentModel`. This is
-    // defensive — the enqueue-time filter is still authoritative for the
-    // common case; we only rewrite content here when modality drifted.
+    // Modality re-check at dequeue (see prior comment in pre-fix file).
     const yieldedMessage = stripUnsupportedModalityBlocks(item.message, currentModel);
 
-    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, requestId=${item.requestId ?? '-'}`);
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, queueId=${item.id}, requestId=${item.requestId ?? '-'}`);
     yield {
       type: 'user' as const,
       message: yieldedMessage,
       parent_tool_use_id: null,
-      session_id: getSessionId()
+      session_id: getSessionId(),
+      // (v0.2.12) Stamp the queue item id as the SDK message uuid. CLI
+      // forwards this through to attachment.source_uuid in queued_command
+      // replay events, so handleQueuedCommandReplay can match the replay
+      // back to our pending state and promote the next item.
+      uuid: item.id as `${string}-${string}-${string}-${string}-${string}`,
     };
     item.resolve();
-    // (v0.2.11 cross-bugfix #142 review-fix-2 #1) Promotion is fully
-    // committed once the SDK has the message. Clear the in-flight flag so
-    // a fresh enqueue arriving now follows the normal busy-vs-direct
-    // routing (busy via isStreamingMessage now true).
     promotedItemInFlight = false;
   }
 }

@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
 use super::types::{ImActiveSession, ImHealthState, ImStatus};
+use crate::utils::bom::strip_bom;
 use crate::{ulog_info, ulog_warn};
 
 /// Persist interval (seconds)
@@ -493,7 +494,10 @@ fn cleanup_orphaned_flat_files() {
 fn read_active_bot_ids(myagents: &Path) -> Option<HashSet<String>> {
     let config_path = myagents.join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    // Tolerate UTF-8 BOM (issue #170 #6) — without this a hand-edited
+    // config.json silently drops all bot IDs, then orphan-cleanup deletes
+    // their data. See utils/bom.rs.
+    let config: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
 
     let mut ids = HashSet::new();
 

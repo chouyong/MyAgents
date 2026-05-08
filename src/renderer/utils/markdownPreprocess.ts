@@ -39,6 +39,22 @@ export function preprocessMarkdownContent(content: string): string {
 
   // Step 2: Apply format fixes to unprotected content
 
+  // 2a-pre. Normalize full-width punctuation that Chinese-tuned models
+  // (DeepSeek, MiniMax, Qwen, GLM, …) emit in place of ASCII markdown markers.
+  // CommonMark only recognizes ASCII `*`, `_`, `~`, `#` etc. — when a model
+  // outputs `＊＊P1＊＊` (U+FF0A) instead of `**P1**`, the bold renders as
+  // literal full-width asterisks (issue #167). We only convert *paired*
+  // patterns so an isolated full-width char in legitimate Chinese text
+  // (e.g., a name with `＊` for redaction) stays untouched.
+  // - `＊＊...＊＊` → `**...**` (bold)
+  // - `＊...＊` → `*...*` (italic — applied after bold so triple-stars work)
+  // - `＿＿...＿＿` → `__...__` (alt bold)
+  // - `～～...～～` → `~~...~~` (GFM strikethrough)
+  processed = processed.replace(/＊＊([^＊\n]+?)＊＊/g, '**$1**');
+  processed = processed.replace(/＊([^＊\n]+?)＊/g, '*$1*');
+  processed = processed.replace(/＿＿([^＿\n]+?)＿＿/g, '__$1__');
+  processed = processed.replace(/～～([^～\n]+?)～～/g, '~~$1~~');
+
   // 2a. Escape currency dollar signs ($100, $3,000, $1.50 etc.)
   // remark-math treats $...$ as inline LaTeX, causing false positives like
   // "$3000 亿...$1880 亿" being rendered as a math expression.

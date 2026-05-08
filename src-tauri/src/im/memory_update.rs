@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use crate::sidecar::{self, ManagedSidecarManager, SidecarOwner};
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 use crate::config_io::with_config_lock;
+use crate::utils::bom::strip_bom;
 
 use super::types::MemoryAutoUpdateConfig;
 
@@ -393,7 +394,7 @@ fn read_session_last_active_map() -> std::collections::HashMap<String, DateTime<
         }
     };
 
-    let sessions: Vec<SessionMeta> = match serde_json::from_str(&content) {
+    let sessions: Vec<SessionMeta> = match serde_json::from_str(strip_bom(&content)) {
         Ok(s) => s,
         Err(e) => {
             ulog_warn!("[memory-update] Failed to parse sessions.json for activity check: {}", e);
@@ -426,7 +427,7 @@ fn collect_qualifying_sessions(workspace_path: &str, config: &MemoryAutoUpdateCo
         Err(_) => return vec![],
     };
 
-    let all_sessions: Vec<SessionMeta> = match serde_json::from_str(&sessions_content) {
+    let all_sessions: Vec<SessionMeta> = match serde_json::from_str(strip_bom(&sessions_content)) {
         Ok(s) => s,
         Err(_) => return vec![],
     };

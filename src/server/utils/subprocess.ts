@@ -75,19 +75,60 @@ const IS_WINDOWS = process.platform === 'win32';
 
 /**
  * Windows-only: `child_process.spawn` cannot execute `.cmd` / `.bat` shims
- * directly without `shell: true` (Node ≥20.12 hard-rejects this since
+ * directly without going through cmd.exe (Node ≥20.12 hard-rejects this since
  * CVE-2024-27980). npm-installed CLI binaries — `codex.cmd`, `gemini.cmd`,
- * `npx.cmd`, plugin-bridge launchers — are exactly these shims, so they
- * silently fail to spawn unless we route them through cmd.exe.
- *
- * Bun.spawn handled this internally pre-migration; the Bun→Node adapter
- * needs to do the same. Returns the cmd-extension test result so callers
- * (`spawn`, `fireAndForget`) can opt into shell mode automatically.
+ * `claude.cmd`, `npx.cmd`, plugin-bridge launchers — are exactly these shims,
+ * so they silently fail to spawn unless we route them through cmd.exe.
  */
 function needsWindowsShell(cmd: string): boolean {
   if (!IS_WINDOWS) return false;
   const lower = cmd.toLowerCase();
   return lower.endsWith('.cmd') || lower.endsWith('.bat');
+}
+
+// cmd.exe metacharacters that need ^-escaping outside double quotes.
+// Source: cross-spawn (battle-tested across the npm ecosystem) — see
+// https://github.com/moxystudio/node-cross-spawn/blob/master/lib/util/escape.js
+const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+
+// `node_modules/.bin/<name>.cmd` shims internally re-invoke cmd.exe, which
+// consumes the ^-escapes a second time — those need double-escaping. Globally
+// installed shims at `%APPDATA%\npm\<name>.cmd` (and our own bundled launchers)
+// don't, so single-escape is correct for them.
+const CMD_SHIM_REGEX = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i;
+
+/**
+ * Quote one arg for safe interpolation into a `cmd.exe /d /s /c "<cmdline>"`
+ * command line. Naive `shell: true` does NOT do this — it space-joins args
+ * verbatim, which means any arg containing `"` (e.g. Codex's
+ * `-c project_doc_fallback_filenames=["CLAUDE.md"]` or Claude Code's
+ * `--append-system-prompt "<text with quotes>"`) gets mangled when the .cmd
+ * shim re-parses argv via MSVCRT rules — the inner quotes are stripped before
+ * the target binary sees them, breaking TOML / shell-arg semantics.
+ *
+ * Algorithm (mirrors cross-spawn):
+ *   1. Backslash-escape each `"` (also doubling preceding backslashes)
+ *   2. Double trailing backslashes so they don't escape the closing quote
+ *   3. Wrap in `"..."`
+ *   4. ^-escape cmd.exe metacharacters (so they survive cmd.exe's first pass)
+ *   5. (For local node_modules/.bin shims only) ^-escape a second time
+ */
+function escapeWindowsCmdArg(arg: string, doubleEscapeMetaChars: boolean): string {
+  let s = String(arg);
+  // Greedy `(\\*)` so 2+ consecutive backslashes preceding `"` (or end-of-arg)
+  // are all doubled. Earlier draft used lazy `(\\+?)?` which captured at most
+  // one backslash and silently emitted `…\\\\"` (4 BS + bare quote) for input
+  // `…\\"`, which cmd.exe then reads as a string terminator → arg truncation.
+  s = s.replace(/(\\*)"/g, '$1$1\\"');
+  s = s.replace(/(\\*)$/, '$1$1');
+  s = `"${s}"`;
+  s = s.replace(CMD_META_CHARS, '^$1');
+  if (doubleEscapeMetaChars) s = s.replace(CMD_META_CHARS, '^$1');
+  return s;
+}
+
+function escapeWindowsCmdCommand(cmd: string): string {
+  return cmd.replace(CMD_META_CHARS, '^$1');
 }
 
 export function spawn(argv: string[], options: SpawnOptions = {}): SubprocessHandle {
@@ -108,10 +149,30 @@ export function spawn(argv: string[], options: SpawnOptions = {}): SubprocessHan
     detached: options.detached,
   };
 
-  // CVE-2024-27980 / Node ≥20.12 hardening: .cmd/.bat must be invoked through
-  // a shell. Node's own quoting under `shell: true` handles the trailing args.
+  // CVE-2024-27980 / Node ≥20.12 hardening: .cmd/.bat cannot be invoked
+  // directly. The previous `nodeOpts.shell = true` path delegated to Node's
+  // built-in shell wrapping, but that wrapping does NOT escape `"`, spaces, or
+  // cmd.exe metacharacters in args — by design (`windowsVerbatimArguments`).
+  // That broke any callers passing structured-text args, e.g.:
+  //   codex -c 'project_doc_fallback_filenames=["CLAUDE.md"]'
+  //   claude --append-system-prompt '<system text with quotes>'
+  // Instead, we manually wrap via `cmd.exe /d /s /c "<escaped cmdline>"` with
+  // the full cross-spawn escape algorithm, which preserves quoting through
+  // both cmd.exe's parser and the .cmd shim's MSVCRT-style re-parse.
   if (needsWindowsShell(cmd)) {
-    nodeOpts.shell = true;
+    const doubleEscape = CMD_SHIM_REGEX.test(cmd);
+    const escapedCmd = escapeWindowsCmdCommand(cmd);
+    const escapedArgs = args.map((a) => escapeWindowsCmdArg(a, doubleEscape));
+    const cmdLine = [escapedCmd, ...escapedArgs].join(' ');
+    nodeOpts.windowsVerbatimArguments = true;
+    // Default windowsHide:true on the cmd.exe wrap path — wrapping IS the
+    // exact situation where a brief console window would otherwise pop. Lets
+    // call sites omit `windowsHide` without leaking a flash, the same
+    // pit-of-success shape as `local_http` / `process_cmd` / `apply_to_subprocess`.
+    if (options.windowsHide === undefined) nodeOpts.windowsHide = true;
+    const comspec = process.env.comspec || 'cmd.exe';
+    const child = nodeSpawn(comspec, ['/d', '/s', '/c', `"${cmdLine}"`], nodeOpts);
+    return wrapChildProcess(child);
   }
 
   const child = nodeSpawn(cmd, args, nodeOpts);

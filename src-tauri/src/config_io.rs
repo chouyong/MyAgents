@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
+use crate::utils::bom::strip_bom;
 use crate::utils::file_lock::{with_file_lock_blocking, FileLockError, FileLockOptions};
 
 fn read_config_json(config_path: &Path) -> Result<serde_json::Value, String> {
@@ -23,7 +24,10 @@ fn read_config_json(config_path: &Path) -> Result<serde_json::Value, String> {
 
     let content = fs::read_to_string(config_path)
         .map_err(|e| format!("[config-io] Cannot read config.json: {}", e))?;
-    serde_json::from_str(&content)
+    // Tolerate UTF-8 BOM (U+FEFF) prepended by Windows editors — without this
+    // a manually-edited config.json would fail to parse with "expected value
+    // at line 1 column 1" and the caller would fall back to .bak (issue #170 #6).
+    serde_json::from_str(strip_bom(&content))
         .map_err(|e| format!("[config-io] Cannot parse config.json: {}", e))
 }
 

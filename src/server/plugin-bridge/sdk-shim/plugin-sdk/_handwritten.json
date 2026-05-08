@@ -1,5 +1,6 @@
 [
   "index",
+  "account-helpers",
   "account-id",
   "agent-runtime",
   "allow-from",

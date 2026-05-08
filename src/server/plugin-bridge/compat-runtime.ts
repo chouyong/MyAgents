@@ -179,7 +179,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
   // Shim compat version — must match the version in sdk-shim/package.json.
   // Plugins check api.runtime.version (e.g. weixin's assertHostCompatibility)
   // to verify the host supports the required SDK surface.
-  const SHIM_COMPAT_VERSION = '2026.4.28';
+  const SHIM_COMPAT_VERSION = '2026.5.9';
 
   const runtime = {
     /** Update the plugin ID after registration */

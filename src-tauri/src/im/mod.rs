@@ -27,6 +27,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Runtime};
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 use crate::config_io::with_config_lock;
+use crate::utils::bom::strip_bom;
 use tokio::sync::{watch, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
@@ -3892,7 +3893,7 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let app_config: PartialAppConfig = match serde_json::from_str(&content) {
+        let app_config: PartialAppConfig = match serde_json::from_str(strip_bom(&content)) {
             Ok(c) => c,
             Err(e) => {
                 let label = ["main", "bak", "tmp"][i];
@@ -4155,7 +4156,7 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let app_config: PartialAppConfig = match serde_json::from_str(&content) {
+        let app_config: PartialAppConfig = match serde_json::from_str(strip_bom(&content)) {
             Ok(c) => c,
             Err(e) => {
                 let label = ["main", "bak", "tmp"][i];
@@ -5511,7 +5512,7 @@ fn read_available_providers_from_disk() -> Option<String> {
     let home = dirs::home_dir()?;
     let config_path = home.join(".myagents").join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let config: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
     config.get("availableProvidersJson")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())

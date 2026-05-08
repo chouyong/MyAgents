@@ -47,7 +47,13 @@ export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute
                 </div>
               )}
 
-              {/* Action buttons — visible on hover */}
+              {/* Action buttons — visible on hover.
+                  (v0.2.12) In-flight items (already yielded to CLI subprocess)
+                  hide the × cancel button: the message has crossed the
+                  process boundary and the SDK exposes no retract API,
+                  so honest UX is "no cancel button when cancel won't
+                  work". The ▷ force-execute (interrupt + send) button
+                  stays available for both states. */}
               <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
                   onClick={() => onForceExecute(qm.queueId)}
@@ -56,13 +62,15 @@ export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute
                 >
                   <Play size={12} />
                 </button>
-                <button
-                  onClick={() => onCancel(qm.queueId)}
-                  title="取消排队"
-                  className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
-                >
-                  <X size={12} />
-                </button>
+                {!qm.isInFlight && (
+                  <button
+                    onClick={() => onCancel(qm.queueId)}
+                    title="取消排队"
+                    className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
               </div>
             </div>
           ))}

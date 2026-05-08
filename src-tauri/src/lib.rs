@@ -526,9 +526,11 @@ pub fn run() {
                         // won't reach — see below
                         let _ = c;
                     }
-                    // Simpler: parse as Value directly
+                    // Simpler: parse as Value directly. strip_bom tolerates a
+                    // Windows-editor-prepended UTF-8 BOM (issue #170 #6) so the
+                    // boot log reflects real config values instead of "?".
                     if let Ok(cfg) = std::fs::read_to_string(dir.join("config.json"))
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))) {
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(crate::utils::bom::strip_bom(&s)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))) {
                         provider = cfg.get("defaultProviderId").and_then(|v| v.as_str()).unwrap_or("none").to_string();
                         mcp = cfg.get("mcpEnabledServers").and_then(|v| v.as_array()).map(|a| a.len() as u32).unwrap_or(0);
                         if let Some(ags) = cfg.get("agents").and_then(|v| v.as_array()) {
@@ -539,7 +541,7 @@ pub fn run() {
                     }
                     if let Ok(s) = std::fs::read_to_string(dir.join("cron_tasks.json")) {
                         // Structure: {"tasks": [{...,"enabled":true/false}, ...]}
-                        cron = serde_json::from_str::<serde_json::Value>(&s).ok()
+                        cron = serde_json::from_str::<serde_json::Value>(crate::utils::bom::strip_bom(&s)).ok()
                             .and_then(|v| v.get("tasks")?.as_array().map(|tasks|
                                 tasks.iter().filter(|t| t.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false)).count() as u32
                             )).unwrap_or(0);

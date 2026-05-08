@@ -433,7 +433,14 @@ export class CodexRuntime implements AgentRuntime {
       // Detached → child becomes its own process-group leader on POSIX so
       // killWithEscalation({ killTree: true }) below can take down the entire
       // model/tool tree, not just the wrapper.
-      detached: true,
+      //
+      // Windows: `detached: true` + stdio:'pipe' breaks parent's stdout reads
+      // — the JSON-RPC `initialize` call hangs forever (issue #170 #3). Windows
+      // doesn't have process groups; tree-kill uses `taskkill /F /T /PID` which
+      // works regardless of detached. `windowsHide: true` suppresses the console
+      // window flash from cmd.exe wrapping the codex.cmd shim.
+      detached: process.platform !== 'win32',
+      windowsHide: true,
     });
 
     const codexProc = new CodexProcess(proc);

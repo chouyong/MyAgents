@@ -599,7 +599,9 @@ export default function SessionHistoryDropdown({
                 </div>
             </Popover>
 
-            {/* Centered confirm dialog — mirrors launcher RecentTasks UX */}
+            {/* ConfirmDialog self-portals to document.body, so no outer
+             *  createPortal wrapper is needed — the dialog already escapes
+             *  any ancestor stacking context to beat FloatingPortal z-50. */}
             {pendingDelete && (
                 <ConfirmDialog
                     title="删除对话"

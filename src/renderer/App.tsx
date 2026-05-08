@@ -772,6 +772,23 @@ export default function App() {
       const isMac = navigator.platform.toLowerCase().includes('mac');
       const modKey = isMac ? e.metaKey : e.ctrlKey;
 
+      // Block reload shortcuts (F5 / Ctrl+F5 / Cmd|Ctrl+R / Cmd|Ctrl+Shift+R).
+      // Reload wipes in-memory tab state (Tab.sessionId / Sidecar owner /
+      // loading flags live in React state, not on disk), tears down every
+      // tab's Sidecar (~30 s to cold-start back), and interrupts in-flight
+      // AI conversations. Windows WebView2 enables these accelerators by
+      // default (`AreBrowserAcceleratorKeysEnabled`); on macOS / Linux the
+      // WebView still honors a JS `preventDefault()` on the keydown.
+      // `e.code === 'KeyR'` covers non-Latin keyboard layouts where the
+      // physical R key produces a non-`r`/`R` `e.key`.
+      if (
+        e.key === 'F5'
+        || (modKey && !e.altKey && (e.key === 'r' || e.key === 'R' || e.code === 'KeyR'))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       // --- Ctrl+Tab / Ctrl+Shift+Tab: cycle through tabs (both platforms use Ctrl) ---
       if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
         e.preventDefault();

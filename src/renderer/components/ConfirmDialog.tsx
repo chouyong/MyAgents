@@ -1,4 +1,5 @@
 import { useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Loader2 } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -65,7 +66,11 @@ export default function ConfirmDialog({
         return () => document.removeEventListener('keydown', handleKeyDown);
     }, [handleKeyDown]);
 
-    return (
+    // Portal to body so z-[300] competes at the root stacking context. Without
+    // this, any caller whose ancestor creates a stacking context renders this
+    // dialog behind sibling FloatingPortal content (Popover/DropdownMenu) at
+    // body level — observed 2026-05-08 with SessionHistoryDropdown.
+    return createPortal(
         <OverlayBackdrop onClose={loading ? undefined : onCancel} className="z-[300] px-4">
             <div className="glass-panel w-full max-w-sm">
                 <div className="border-b border-[var(--line)] px-5 py-4">
@@ -100,7 +105,8 @@ export default function ConfirmDialog({
                     </button>
                 </div>
             </div>
-        </OverlayBackdrop>
+        </OverlayBackdrop>,
+        document.body,
     );
 }
 

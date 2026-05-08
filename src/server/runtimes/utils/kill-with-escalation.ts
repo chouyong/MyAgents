@@ -17,7 +17,10 @@ export interface KillEscalationOptions {
    *     `detached: true` so it became the leader of a new group; otherwise the
    *     negative-pid signal would be delivered to our *own* group too.
    *   - Windows: spawn `taskkill /F /T /PID <pid>` which terminates the child
-   *     and all of its descendants regardless of process-group state.
+   *     and all of its descendants regardless of process-group state — so on
+   *     Windows the runtime child is intentionally spawned with
+   *     `detached: false` (detached + stdio:'pipe' breaks parent stdout reads
+   *     on Windows; see issue #170 #3/#5).
    *
    * Required for runtime CLIs (Claude Code / Codex / Gemini) that fork their
    * own model / tool subprocesses — without tree-kill those subprocesses
@@ -84,7 +87,8 @@ function killTreeBestEffort(proc: EscalatableProcess, signal: NodeJS.Signals | n
   // POSIX: signal the process group. proc.pid here MUST be the pgid
   // (i.e. the child must have been spawned with `detached: true` so it
   // became its own group leader) — otherwise the negative-pid signal
-  // targets our own group too and we'd kill the sidecar.
+  // targets our own group too and we'd kill the sidecar. (Windows uses
+  // taskkill /T above and does not enter this branch.)
   try {
     process.kill(-proc.pid, signal as NodeJS.Signals);
   } catch (err) {

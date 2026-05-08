@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.12] - 2026-05-09
+
+> 0.2.11 残留问题集中修复：定时任务能跑、Windows 用户能用、AI 中文输出不走样、对话细节回到正轨。
+
+### Fixed
+
+- **定时任务真的会执行（issue #166）**：`0 21 * * 0`（每周日 21 点）这类标准 cron 表达式之前会卡在 running 状态、永远不触发，用户完全无感知。
+- **AI 中文输出的加粗和表格不再走样（issue #167）**：DeepSeek / MiniMax 等中文模型输出的全角星号 `＊＊文字＊＊` 现在能正确渲染为粗体。
+- **Windows 外部 runtime 解封（issue #170）**：Codex / Claude Code / Gemini 在 Windows 启动后永久挂起的问题修复；调用外部 runtime 和 MCP 时也不再频繁弹出黑色控制台窗口；带引号或特殊字符的参数（如 Codex 的 TOML 配置）能正确传入。
+- **手动编辑过的配置文件不再丢数据（issue #170）**：用 Notepad 等工具保存的 `config.json` / `cron_tasks.json` / `sessions.json`（带 UTF-8 BOM）之前会被静默丢弃回退到备份，看起来像数据丢失。
+- **AI 输出过程中追加消息更及时**：AI 还在输出时按 ⏎ 追加的新消息能立即进入当前轮处理，不再等本轮完整结束。
+- **同账号开多 Tab 不互相错杀（issue #169）**：两个 Tab 打开同一会话时切换不再产生路由错乱。
+- **删除对话的确认按钮不再被历史菜单挡住**。
+- **F5 / Cmd+R 不再误退到 launcher**，当前 Tab 上下文不会丢失。
+- **微信 / 飞书 / 钉钉 bot 跟上 OpenClaw 升级（issue #171）**：插件升级后启动报「host too old or plugin SDK contract violated」的问题修复。
+
+---
+
 ## [0.2.11] - 2026-05-08
 
 > 重点修复：微信 bot 升级到 2.4.2 后能正常启动；切到 IM bot 历史会话不再被弹回 Launcher；订阅版 Sonnet 4.6 不再撞 1M 限额；流式输出中"取消排队消息"真的能取消。同时把定时任务 / 退出 cron / IM 发图统一到 `myagents` CLI，让外部 runtime（Codex / Gemini / Claude Code CLI）也能用。

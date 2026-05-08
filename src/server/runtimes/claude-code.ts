@@ -338,13 +338,21 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // we can later kill the entire tree via `process.kill(-pid, signal)`. Pre-fix,
     // `proc.kill()` only signalled the wrapper and orphaned model/tool subprocesses
     // (see killWithEscalation `killTree`).
+    //
+    // Windows: `detached: true` is incompatible with stdio:'pipe' — the parent
+    // never receives the child's stdout, so JSON-RPC `initialize` hangs forever
+    // (issue #170 #5). Windows also doesn't have process groups; tree-kill on
+    // Windows uses `taskkill /F /T /PID` which works regardless of detached.
+    // `windowsHide: true` suppresses the console window flash from cmd.exe
+    // wrapping the .cmd shim.
     const proc = spawn([resolveCommand('claude'), ...args], {
       cwd: options.workspacePath,
       env: augmentedProcessEnv(),
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
-      detached: true,
+      detached: process.platform !== 'win32',
+      windowsHide: true,
     });
 
     const handle = new ClaudeCodeProcess(proc);
