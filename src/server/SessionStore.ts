@@ -575,14 +575,36 @@ export async function updateSessionMetadata(
         | 'configSnapshotAt'
     >>
 ): Promise<SessionMetadata | null> {
-    const session = getSessionMetadata(sessionId);
-    if (!session) {
-        return null;
-    }
-
-    const updated = { ...session, ...updates };
-    await saveSessionMetadata(updated);
-    return updated;
+    // Race-safe read-modify-write — must happen entirely under
+    // `withSessionsLock` so a concurrent updater (e.g. periodic stats /
+    // title patch / runtime-change freeze) doesn't get its just-applied
+    // changes clobbered by us reading a pre-their-write snapshot and
+    // writing back the full stale object.
+    //
+    // Pre-v0.2.14: read happened OUTSIDE the lock, so two concurrent
+    // updaters could each compute `{...session, ...patch_X}` from the
+    // same snapshot and the second writer would silently drop the first
+    // writer's fields. Now: read fresh under the lock, patch, write back
+    // — all atomic. (review-by-codex F3.)
+    ensureStorageDir();
+    let result: SessionMetadata | null = null;
+    await withSessionsLock(async () => {
+        const all = getAllSessionMetadata();
+        const idx = all.findIndex(s => s.id === sessionId);
+        if (idx < 0) {
+            // session not found — leave result=null
+            return;
+        }
+        const updated: SessionMetadata = { ...all[idx], ...updates };
+        all[idx] = updated;
+        try {
+            atomicWriteSessionsFile(JSON.stringify(all, null, 2));
+            result = updated;
+        } catch (error) {
+            console.error('[SessionStore] updateSessionMetadata write failed:', error);
+        }
+    });
+    return result;
 }
 
 /**

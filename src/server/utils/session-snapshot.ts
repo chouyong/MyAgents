@@ -16,6 +16,31 @@ import type { SessionMetadata } from '../types/session';
  */
 
 /**
+ * Payload set captured by the "owned session" snapshot policy. Single
+ * source of truth for "what to copy from agent config into a session
+ * being frozen". Referenced by:
+ *   - `snapshotForOwnedSession()` below (desktop/Cron creation path)
+ *   - `/api/session/freeze` endpoint (v0.2.14+ runtime-change detach)
+ *   - Rust `OwnedSessionSnapshot` in `src-tauri/src/im/runtime_change.rs`
+ *     (v0.2.14+ — must keep field set in lock-step with this type)
+ *
+ * `configSnapshotAt` is INTENTIONALLY EXCLUDED from this Pick — it's the
+ * "this session is frozen" marker, stamped by the writer (sidecar
+ * `/api/session/freeze` and Rust file-lock fallback) at write time, not
+ * passed through the snapshot payload. Mixing it into the payload caused
+ * TS↔Rust drift in the v0.2.14 first-cut review. (review-by-codex F2.)
+ */
+export type OwnedSessionSnapshot = Pick<
+  SessionMetadata,
+  | 'runtime'
+  | 'model'
+  | 'permissionMode'
+  | 'mcpEnabledServers'
+  | 'providerId'
+  | 'providerEnvJson'
+>;
+
+/**
  * IM (Agent channel) owner — live-follow policy (D4).
  *
  * IM sessions deliberately do NOT snapshot model/permission/mcp; each message
@@ -40,8 +65,18 @@ export function snapshotForImSession(agent: AgentConfig): Partial<SessionMetadat
  * and is not affected by later changes to AgentConfig (D1). Cron `new_task`
  * tick creates a fresh snapshot each run (every tick reads current Agent);
  * Cron `current_session` freezes at first creation and reuses forever.
+ *
+ * Return shape = `OwnedSessionSnapshot` payload + the writer-stamped
+ * `configSnapshotAt` marker. For the desktop-creation path, "writer" =
+ * this function (we stamp `now` here). For the runtime-change freeze path,
+ * the writers (`/api/session/freeze` endpoint and Rust file-lock fallback)
+ * stamp `configSnapshotAt` themselves so the marker reflects when the
+ * write actually committed — those callers should pass `OwnedSessionSnapshot`
+ * by itself, not the return of this function.
  */
-export function snapshotForOwnedSession(agent: AgentConfig): Partial<SessionMetadata> {
+export function snapshotForOwnedSession(
+  agent: AgentConfig,
+): OwnedSessionSnapshot & Pick<SessionMetadata, 'configSnapshotAt'> {
   return {
     runtime: agent.runtime ?? 'builtin',
     model: agent.model,

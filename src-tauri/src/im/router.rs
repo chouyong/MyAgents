@@ -606,6 +606,13 @@ impl SessionRouter {
         self.peer_sessions.values()
     }
 
+    /// Snapshot the set of peer_session_keys currently bound. Used by the
+    /// runtime-change orchestrator (`runtime_change.rs`) to iterate without
+    /// holding a borrow into the HashMap during async freeze HTTP calls.
+    pub fn peer_session_keys(&self) -> Vec<String> {
+        self.peer_sessions.keys().cloned().collect()
+    }
+
     /// Get active peer session info (for health state)
     pub fn active_sessions(&self) -> Vec<super::types::ImActiveSession> {
         self.peer_sessions

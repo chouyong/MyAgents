@@ -14,6 +14,7 @@ pub mod heartbeat;
 pub mod memory_update;
 pub mod reply_router;
 pub mod router;
+pub mod runtime_change;
 pub mod telegram;
 pub mod types;
 mod util;
@@ -6454,6 +6455,28 @@ pub async fn cmd_update_agent_config(
     // is handled by the TypeScript patchAgentConfig service)
     let agents_guard = agentState.lock().await;
     if let Some(agent) = agents_guard.get(&agentId) {
+        // ── Snapshot capture for runtime-change session detach ──
+        // Detect whether this patch will change the agent's runtime, and if
+        // so, capture the agent's CURRENT in-memory config IMMEDIATELY —
+        // before the next four `if let Some(...)` blocks mutate
+        // `current_model` / `current_provider_env` / `permission_mode` /
+        // `mcp_servers_json`. The snapshot must reflect the OLD state so
+        // that detached IM sessions remember what they were running on.
+        // (review-by-codex F1 — earlier rev captured snapshot inside the
+        // runtime branch AFTER those four had been replaced, completely
+        // defeating the feature.)
+        let old_runtime_for_change = agent.runtime.read().await.clone();
+        let new_runtime_for_change = patch
+            .runtime
+            .as_ref()
+            .map(|r| normalize_runtime_type(Some(r.as_str())))
+            .filter(|n| n != &old_runtime_for_change);
+        let pre_change_snapshot = if new_runtime_for_change.is_some() {
+            Some(runtime_change::build_snapshot_from_agent_state(agent).await)
+        } else {
+            None
+        };
+
         if let Some(ref model) = patch.model {
             *agent.current_model.write().await = Some(model.clone());
             for (_ch_id, ch_inst) in &agent.channels {
@@ -6485,6 +6508,40 @@ pub async fn cmd_update_agent_config(
         }
         if let Some(ref runtime) = patch.runtime {
             let normalized = normalize_runtime_type(Some(runtime.as_str()));
+
+            // ── Runtime-change session detach (v0.2.14 dogfood fix) ──
+            // Cross-runtime session resume is structurally broken (SDK rejects
+            // "Session ID is already in use", provider env drift, T12 gate
+            // chooses not to kill). When the runtime actually changes AND the
+            // agent has bot bindings, freeze each bound session with the OLD
+            // config (captured at function entry above into `pre_change_snapshot`)
+            // and rotate to a fresh session_id so the next IM message starts
+            // cleanly on the new runtime.
+            //
+            // We use `pre_change_snapshot` rather than re-reading agent state
+            // because `current_model` / `current_provider_env` / `permission_mode`
+            // / `mcp_servers_json` may have been mutated by the patches above —
+            // the OLD agent config is no longer recoverable from agent state
+            // by the time we get here. (review-by-codex F1.)
+            //
+            // No-op when runtime didn't actually change (we already filtered
+            // that at function entry — `new_runtime_for_change` is None) or
+            // when the agent has zero peer_sessions across all channels
+            // (covered inside the orchestrator's loop).
+            if let (Some(ref new_rt), Some(snapshot)) =
+                (new_runtime_for_change.as_ref(), pre_change_snapshot)
+            {
+                debug_assert_eq!(new_rt.as_str(), normalized.as_str(), "runtime normalization stable");
+                runtime_change::freeze_and_rotate_for_runtime_change(
+                    agent,
+                    &old_runtime_for_change,
+                    new_rt,
+                    &sidecarManager,
+                    snapshot,
+                )
+                .await;
+            }
+
             *agent.runtime.write().await = normalized.clone();
             for (_ch_id, ch_inst) in &agent.channels {
                 *ch_inst.bot_instance.runtime.write().await = normalized.clone();
@@ -6492,6 +6549,13 @@ pub async fn cmd_update_agent_config(
                 // binary). Preserve peer_session bindings so handover and IM
                 // message routing keep working — `release_all` would wipe them
                 // and silently break later operations on this channel.
+                //
+                // After runtime_change orchestrator above, peer_sessions point
+                // at fresh UUIDs with sidecar_port=0; this call effectively
+                // becomes a no-op for those (release_session_sidecar returns
+                // Ok(false) for non-existent sidecars). Kept intact for the
+                // runtime_actually_changed=false path, where it still does
+                // legitimate sidecar cleanup work.
                 ch_inst
                     .bot_instance
                     .router

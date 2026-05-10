@@ -7346,6 +7346,82 @@ async function main() {
         }
       }
 
+      // POST /api/session/freeze - Stamp an OwnedSessionSnapshot onto the
+      // session metadata, converting it from D4 live-follow to a frozen
+      // historical session.
+      //
+      // Used by the Rust `cmd_update_agent_config` runtime-change orchestrator:
+      // when an agent's runtime is about to change, every bot-bound session
+      // (peer_session) is frozen FIRST with the agent's about-to-be-replaced
+      // config, then its session_id is rotated. The old session detaches and
+      // becomes a regular historical session that, on reopen, uses its captured
+      // OLD runtime + config (matching the desktop session reopening path).
+      //
+      // Body: { sessionId, snapshot: OwnedSessionSnapshot } — Rust supplies
+      // the field values it just read from the agent state on disk. Only
+      // fields that are present and pass per-field type validation are
+      // patched onto the session metadata; absent or wrong-typed fields are
+      // skipped (NOT cleared) — keeps the HTTP path symmetric with the Rust
+      // file-lock fallback writer in `runtime_change.rs::freeze_via_file_lock`,
+      // which only inserts present keys. (review-by-codex F2: original
+      // unconditionally spread `undefined` into present fields, so a missing
+      // `model` would silently nuke the existing model on the session.)
+      //
+      // `configSnapshotAt` is ALWAYS stamped here at write time, not passed
+      // through the wire — the marker reflects when the freeze committed,
+      // not when Rust composed the payload.
+      if (pathname === '/api/session/freeze' && request.method === 'POST') {
+        try {
+          const raw = await request.json() as Record<string, unknown>;
+          if (typeof raw?.sessionId !== 'string' || !raw.sessionId) {
+            return jsonResponse({ success: false, error: 'sessionId required' }, 400);
+          }
+          const snapshot = raw.snapshot as Record<string, unknown> | undefined;
+          if (!snapshot || typeof snapshot !== 'object') {
+            return jsonResponse({ success: false, error: 'snapshot required' }, 400);
+          }
+
+          // Build a typed patch with ONLY the fields that are present AND
+          // pass per-field validation. Always stamp configSnapshotAt.
+          const { updateSessionMetadata } = await import('./SessionStore');
+          type FreezePatch = Parameters<typeof updateSessionMetadata>[1];
+          const patch: FreezePatch = {
+            configSnapshotAt: new Date().toISOString(),
+          };
+          if (typeof snapshot.runtime === 'string' && snapshot.runtime.length > 0) {
+            patch.runtime = snapshot.runtime as FreezePatch['runtime'];
+          }
+          if (typeof snapshot.model === 'string') {
+            patch.model = snapshot.model;
+          }
+          if (typeof snapshot.permissionMode === 'string') {
+            patch.permissionMode = snapshot.permissionMode;
+          }
+          if (Array.isArray(snapshot.mcpEnabledServers)) {
+            const ids = snapshot.mcpEnabledServers.filter(
+              (v): v is string => typeof v === 'string',
+            );
+            patch.mcpEnabledServers = ids;
+          }
+          if (typeof snapshot.providerId === 'string') {
+            patch.providerId = snapshot.providerId;
+          }
+          if (typeof snapshot.providerEnvJson === 'string') {
+            patch.providerEnvJson = snapshot.providerEnvJson;
+          }
+
+          const updated = await updateSessionMetadata(raw.sessionId, patch);
+          if (!updated) {
+            return jsonResponse({ success: false, error: 'session not found' }, 404);
+          }
+          console.log(`[api/session/freeze] frozen sessionId=${raw.sessionId.slice(0, 8)} runtime=${updated.runtime ?? 'builtin'}`);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/session/freeze] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to freeze session' }, 500);
+        }
+      }
+
       // GET /api/session/config - Read sidecar's current config state
       // Used by Tabs joining an existing sidecar (e.g. IM Bot session) to adopt
       // the session's config instead of pushing their own.
