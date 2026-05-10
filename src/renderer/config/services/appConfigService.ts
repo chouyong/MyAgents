@@ -30,6 +30,48 @@ function isValidAppConfig(data: unknown): data is AppConfig {
     return data !== null && typeof data === 'object' && !Array.isArray(data);
 }
 
+// ============= cronNotifications → osNotifications Migration =============
+//
+// Pre-0.2.14 the master notification toggle was named `cronNotifications`
+// but only 1 of 6 trigger sites was actually cron-related (it was a
+// decorative toggle that no code path read). 0.2.14 renamed the field to
+// `osNotifications` AND made it functional. Without this migration, users
+// who deliberately set `cronNotifications: false` would silently get the
+// new default (true) — they'd start receiving notifications they expected
+// to be off. Mirror the legacy value into the new field so opt-out is
+// preserved across the rename.
+//
+// Idempotent — a `_done` latch suppresses repeat runs after the first
+// successful save flushes both fields out of the loaded shape.
+let _osNotificationsMigrationDone = false;
+
+export function migrateOsNotificationsField(config: AppConfig): AppConfig {
+    if (_osNotificationsMigrationDone) return config;
+    // Use a record cast so we can talk about the legacy field that the
+    // current AppConfig type no longer declares. Narrowing against the
+    // *required* `osNotifications` via `in` would narrow to `never` and
+    // break later property access; index-access on the record sidesteps it.
+    const raw = config as unknown as Record<string, unknown>;
+    const legacy = raw['cronNotifications'];
+    const hasNew = 'osNotifications' in raw && typeof raw['osNotifications'] === 'boolean';
+    if (typeof legacy === 'boolean' && !hasNew) {
+        raw['osNotifications'] = legacy;
+        delete raw['cronNotifications'];
+        _osNotificationsMigrationDone = true;
+        saveAppConfig(config).catch(err => {
+            console.error('[configService] Failed to persist osNotifications migration:', err);
+        });
+        return config;
+    }
+    // Already had osNotifications (or no legacy field) — strip dead field
+    // if present so it can't drift back into the shape on next save.
+    if ('cronNotifications' in raw) {
+        delete raw['cronNotifications'];
+    }
+    _osNotificationsMigrationDone = true;
+    return config;
+}
+
 // ============= IM Bot Migration =============
 
 let _imBotMigrationDone = false;
@@ -76,7 +118,12 @@ export async function loadAppConfig(): Promise<AppConfig> {
 
         const loaded = await safeLoadJson<AppConfig>(configPath, isValidAppConfig);
         if (loaded) {
-            const merged = { ...dynamicDefault, ...loaded };
+            // Run the cronNotifications migration BEFORE the dynamicDefault
+            // merge — once the default supplies `osNotifications: true`, the
+            // legacy field is masked and we can no longer distinguish "user
+            // had cron on" from "user had cron off".
+            const migrated = migrateOsNotificationsField(loaded);
+            const merged = { ...dynamicDefault, ...migrated };
             return migrateImBotConfig(merged);
         }
         return dynamicDefault;

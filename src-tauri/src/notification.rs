@@ -230,6 +230,12 @@ fn read_notification_prefs() -> NotificationPrefs {
     #[serde(rename_all = "camelCase")]
     struct PartialAppConfig {
         os_notifications: Option<bool>,
+        /// Pre-0.2.14 master toggle. Read as a fallback so users who
+        /// deliberately set `cronNotifications: false` keep notifications
+        /// suppressed BEFORE the renderer's migrateOsNotificationsField
+        /// runs and rewrites the field on disk. Otherwise: launch app,
+        /// notification fires before they open Settings, surprise.
+        cron_notifications: Option<bool>,
         notification_sound: Option<bool>,
     }
 
@@ -240,7 +246,10 @@ fn read_notification_prefs() -> NotificationPrefs {
         .and_then(|content| serde_json::from_str(strip_bom(&content)).ok());
 
     NotificationPrefs {
-        os_notifications: parsed.as_ref().and_then(|c| c.os_notifications).unwrap_or(true),
+        os_notifications: parsed
+            .as_ref()
+            .and_then(|c| c.os_notifications.or(c.cron_notifications))
+            .unwrap_or(true),
         notification_sound: parsed.and_then(|c| c.notification_sound).unwrap_or(true),
     }
 }
@@ -413,9 +422,35 @@ fn queue_pending_click(tab_id: String) {
         // Promote to Ambiguous: we now have ≥2 unconsumed notifications
         // and can't tell which one the user will click. Keep the older
         // queued_at so TTL bounds the ambiguous window correctly.
+        //
+        // Boundary fix (review-by-codex): if the old `Single` is itself
+        // already past TTL (notification fired ≥30s ago, never clicked),
+        // the user has clearly abandoned it — treat it as Empty for the
+        // promotion. Otherwise we'd build an Ambiguous state seeded with
+        // an already-expired timestamp, and `take_pending_click` doesn't
+        // apply TTL to Ambiguous → the latch stays stuck refusing routes
+        // until the next queue flushes it. v0.2.14 dogfood scenario:
+        // queue A, leave window unfocused 31s, queue B, click B → gets
+        // no deep-link forever.
+        PendingState::Single(prev) if prev.queued_at.elapsed() > PENDING_CLICK_TTL => {
+            PendingState::Single(PendingClick {
+                tab_id,
+                queued_at: now,
+            })
+        }
         PendingState::Single(prev) => PendingState::Ambiguous {
             queued_at: prev.queued_at,
         },
+        // Same TTL hygiene for an already-Ambiguous entry: if its anchor
+        // is past TTL when a new notification arrives, reset to Single on
+        // the fresh entry. The user's previous batch is no longer the one
+        // being clicked.
+        PendingState::Ambiguous { queued_at } if queued_at.elapsed() > PENDING_CLICK_TTL => {
+            PendingState::Single(PendingClick {
+                tab_id,
+                queued_at: now,
+            })
+        }
         PendingState::Ambiguous { queued_at } => PendingState::Ambiguous { queued_at },
     };
 }
@@ -539,5 +574,39 @@ mod tests {
             });
         }
         assert_eq!(take_pending_click(), None, "TTL must drop stale Single");
+
+        // 7. queue → wait past TTL → queue → take must route to the LATER
+        //    notification (not stick on Ambiguous-with-stale-anchor). This
+        //    is the boundary fix from the v0.2.14 codex review.
+        reset();
+        {
+            let mut guard = PENDING_CLICK.lock().unwrap();
+            *guard = PendingState::Single(PendingClick {
+                tab_id: "tab-old".into(),
+                queued_at: Instant::now() - Duration::from_secs(31),
+            });
+        }
+        queue_pending_click("tab-fresh-after-stale".into());
+        assert_eq!(
+            take_pending_click(),
+            Some("tab-fresh-after-stale".into()),
+            "stale Single must not poison the Ambiguous promotion",
+        );
+
+        // 8. Pre-existing Ambiguous past TTL + new queue → resets to Single
+        //    on the fresh entry rather than refusing forever.
+        reset();
+        {
+            let mut guard = PENDING_CLICK.lock().unwrap();
+            *guard = PendingState::Ambiguous {
+                queued_at: Instant::now() - Duration::from_secs(31),
+            };
+        }
+        queue_pending_click("tab-after-ambiguous".into());
+        assert_eq!(
+            take_pending_click(),
+            Some("tab-after-ambiguous".into()),
+            "stale Ambiguous must not poison subsequent routes",
+        );
     }
 }
