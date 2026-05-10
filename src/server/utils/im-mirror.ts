@@ -10,7 +10,7 @@
  * the common case for pure-desktop sessions.
  *
  * What we mirror (Q1·C / Q2 / Q5 lockdown):
- *   * user role: full text with `👤 桌面端用户消息` prefix, plus PNG/JPG
+ *   * user role: full text with `[From: 桌面端用户消息]` prefix, plus PNG/JPG
  *     attachments inline.
  *   * assistant role: AI text block (one call per content_block_stop). NO
  *     prefix — flows through to IM as plain bot reply, matching the

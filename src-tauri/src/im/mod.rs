@@ -350,6 +350,14 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Bridge(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
         }
     }
+    async fn send_plain_text(&self, chat_id: &str, text: &str) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => adapter::ImAdapter::send_plain_text(a.as_ref(), chat_id, text).await,
+            Self::Feishu(a) => adapter::ImAdapter::send_plain_text(a.as_ref(), chat_id, text).await,
+            Self::Dingtalk(a) => adapter::ImAdapter::send_plain_text(a.as_ref(), chat_id, text).await,
+            Self::Bridge(a) => adapter::ImAdapter::send_plain_text(a.as_ref(), chat_id, text).await,
+        }
+    }
     async fn ack_received(&self, chat_id: &str, message_id: &str) {
         match self {
             Self::Telegram(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,

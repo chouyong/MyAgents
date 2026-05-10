@@ -2005,7 +2005,7 @@ struct MirrorImage {
     data_base64: String,
 }
 
-const DESKTOP_USER_PREFIX: &str = "👤 桌面端用户消息";
+const DESKTOP_USER_PREFIX: &str = "[From: 桌面端用户消息]";
 const MIRROR_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 /// Find the channel currently bound to `session_id`. Scans agent channels'
@@ -2047,15 +2047,27 @@ async fn mirror_to_channel_handler(
     let (adapter, chat_id, channel_id) = resolved;
 
     // ----- Body text (with prefix for user role) -----
+    //
+    // PRD 0.2.14 — visual style differentiation:
+    //   * user role  → `send_plain_text`. On Feishu this maps to `msg_type: text`
+    //     so the IM rendering looks like a real user typed it (not a bot post
+    //     card). On Telegram/Dingtalk/Bridge the trait default falls through
+    //     to `send_message` since those platforms have no Post/Text distinction.
+    //   * assistant role → `send_message` (existing path). Matches the AI's
+    //     direct IM reply format byte-for-byte (Feishu post type, etc.) so
+    //     mirrored AI replies are visually indistinguishable from native ones.
     let body = req.text.unwrap_or_default();
     let mut text_failed = false;
     let mut sent_text = false;
     if !body.is_empty() {
-        let payload = match req.role.as_str() {
-            "user" => format!("{}\n{}", DESKTOP_USER_PREFIX, body),
-            _ => body.clone(),
+        let result = match req.role.as_str() {
+            "user" => {
+                let payload = format!("{}\n{}", DESKTOP_USER_PREFIX, body);
+                adapter.send_plain_text(&chat_id, &payload).await
+            }
+            _ => adapter.send_message(&chat_id, &body).await,
         };
-        match adapter.send_message(&chat_id, &payload).await {
+        match result {
             Ok(_) => sent_text = true,
             Err(e) => {
                 ulog_warn!(

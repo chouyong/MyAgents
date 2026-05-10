@@ -34,6 +34,22 @@ pub trait ImAdapter: Send + Sync + 'static {
         text: &str,
     ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 
+    /// Send a "plain text" message — the format that visually matches what a
+    /// human user types in the IM client (no markdown post, no card). Used by
+    /// the desktop→IM mirror (PRD 0.2.14) for user-origin messages so the IM
+    /// rendering matches "user typed this", not "bot generated a post".
+    ///
+    /// Default implementation falls through to `send_message`. Adapters whose
+    /// platforms have a distinct simple-text format (e.g. Feishu's
+    /// `msg_type: text`) should override.
+    fn send_plain_text(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send {
+        self.send_message(chat_id, text)
+    }
+
     /// React to indicate the message was received (e.g. 👀).
     fn ack_received(
         &self,

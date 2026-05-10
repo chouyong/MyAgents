@@ -944,6 +944,32 @@ impl FeishuAdapter {
 
     // ===== Message operations =====
 
+    /// Send a `msg_type: "text"` message — Feishu's simplest plain-text format.
+    ///
+    /// This is the format Feishu users see when they type a normal message
+    /// themselves. Unlike `send_post_message` which renders as a structured
+    /// rich-text post (looks like a small card with paragraphs), `text` shows
+    /// as a regular chat bubble. PRD 0.2.14 — used by the desktop→IM mirror
+    /// for the user-side message so it visually matches an IM-side user reply
+    /// instead of looking like an AI-generated post card.
+    pub async fn send_simple_text_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
+        let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
+        let content = serde_json::to_string(&json!({ "text": text })).unwrap_or_default();
+        let body = json!({
+            "receive_id": chat_id,
+            "msg_type": "text",
+            "content": content,
+        });
+
+        let resp = self.api_call("POST", &url, Some(&body)).await?;
+        let msg_id = resp["data"]["message_id"].as_str().map(String::from);
+        Ok(msg_id)
+    }
+
     /// Send a rich-text (post) message and return the message_id.
     /// Automatically converts Markdown to Feishu Post format.
     /// Always uses Post format — for streaming drafts and explicit Post-only paths.
@@ -2178,6 +2204,13 @@ impl super::adapter::ImAdapter for FeishuAdapter {
 
     async fn send_message(&self, chat_id: &str, text: &str) -> super::adapter::AdapterResult<()> {
         self.send_text_message(chat_id, text).await.map(|_| ())
+    }
+
+    async fn send_plain_text(&self, chat_id: &str, text: &str) -> super::adapter::AdapterResult<()> {
+        // Override: use `msg_type: text` so the message looks like a user
+        // typed it in Feishu, not like an AI-generated post (Card Kit / Post).
+        // PRD 0.2.14 — desktop→IM mirror for user-origin messages.
+        self.send_simple_text_message(chat_id, text).await.map(|_| ())
     }
 
     async fn ack_received(&self, _chat_id: &str, _message_id: &str) {
