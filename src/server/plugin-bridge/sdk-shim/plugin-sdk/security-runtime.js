@@ -7,6 +7,25 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/security-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function SafeOpenError() { _w('SafeOpenError'); return undefined; }
+export function openFileWithinRoot() { _w('openFileWithinRoot'); return undefined; }
+export function writeFileFromPathWithinRoot() { _w('writeFileFromPathWithinRoot'); return undefined; }
+export function extractErrorCode() { _w('extractErrorCode'); return undefined; }
+export function formatErrorMessage() { _w('formatErrorMessage'); return ""; }
+export function hasProxyEnvConfigured() { _w('hasProxyEnvConfigured'); return false; }
+export function normalizeHostname() { _w('normalizeHostname'); return ""; }
+export function SsrFBlockedError() { _w('SsrFBlockedError'); return undefined; }
+export function isBlockedHostnameOrIp() { _w('isBlockedHostnameOrIp'); return false; }
+export function isPrivateNetworkAllowedByPolicy() { _w('isPrivateNetworkAllowedByPolicy'); return false; }
+export function matchesHostnameAllowlist() { _w('matchesHostnameAllowlist'); return undefined; }
+export function resolvePinnedHostnameWithPolicy() { _w('resolvePinnedHostnameWithPolicy'); return undefined; }
+export function isNotFoundPathError() { _w('isNotFoundPathError'); return false; }
+export function isPathInside() { _w('isPathInside'); return false; }
+export function ensurePortAvailable() { _w('ensurePortAvailable'); return undefined; }
+export function generateSecureToken() { _w('generateSecureToken'); return undefined; }
+export function resolvePreferredOpenClawTmpDir() { _w('resolvePreferredOpenClawTmpDir'); return undefined; }
+export function redactSensitiveText() { _w('redactSensitiveText'); return undefined; }
+export function safeEqualSecret() { _w('safeEqualSecret'); return undefined; }
 export function collectConditionalChannelFieldAssignments() { _w('collectConditionalChannelFieldAssignments'); return []; }
 export function collectNestedChannelFieldAssignments() { _w('collectNestedChannelFieldAssignments'); return []; }
 export function collectSimpleChannelFieldAssignments() { _w('collectSimpleChannelFieldAssignments'); return []; }

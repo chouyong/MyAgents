@@ -30,8 +30,9 @@ export function createBackupArchive() { _w('createBackupArchive'); return undefi
 export function detectPluginInstallPathIssue() { _w('detectPluginInstallPathIssue'); return undefined; }
 export function formatPluginInstallPathIssue() { _w('formatPluginInstallPathIssue'); return ""; }
 export function collectProviderDangerousNameMatchingScopes() { _w('collectProviderDangerousNameMatchingScopes'); return []; }
+export function registerUncaughtExceptionHandler() { _w('registerUncaughtExceptionHandler'); return undefined; }
 export function registerUnhandledRejectionHandler() { _w('registerUnhandledRejectionHandler'); return undefined; }
-export const removePluginFromConfig = undefined;
+export function removePluginFromConfig() { _w('removePluginFromConfig'); return undefined; }
 export function enableConsoleCapture() { _w('enableConsoleCapture'); return undefined; }
 export function getConsoleSettings() { _w('getConsoleSettings'); return undefined; }
 export function getResolvedConsoleSettings() { _w('getResolvedConsoleSettings'); return undefined; }

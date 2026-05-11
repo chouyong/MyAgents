@@ -19,6 +19,7 @@ export function applyAnthropicEphemeralCacheControlMarkers() { _w('applyAnthropi
 export function applyAnthropicPayloadPolicyToParams() { _w('applyAnthropicPayloadPolicyToParams'); return undefined; }
 export function buildCopilotDynamicHeaders() { _w('buildCopilotDynamicHeaders'); return undefined; }
 export function composeProviderStreamWrappers() { _w('composeProviderStreamWrappers'); return undefined; }
+export function createAnthropicThinkingPrefillPayloadWrapper() { _w('createAnthropicThinkingPrefillPayloadWrapper'); return undefined; }
 export function createBedrockNoCacheWrapper() { _w('createBedrockNoCacheWrapper'); return undefined; }
 export function createMoonshotThinkingWrapper() { _w('createMoonshotThinkingWrapper'); return undefined; }
 export function createToolStreamWrapper() { _w('createToolStreamWrapper'); return undefined; }
@@ -26,9 +27,11 @@ export function createZaiToolStreamWrapper() { _w('createZaiToolStreamWrapper');
 export function defaultToolStreamExtraParams() { _w('defaultToolStreamExtraParams'); return undefined; }
 export function hasCopilotVisionInput() { _w('hasCopilotVisionInput'); return false; }
 export function isAnthropicBedrockModel() { _w('isAnthropicBedrockModel'); return false; }
+export function isOpenAICompatibleThinkingEnabled() { _w('isOpenAICompatibleThinkingEnabled'); return false; }
 export function resolveAnthropicPayloadPolicy() { _w('resolveAnthropicPayloadPolicy'); return undefined; }
 export function resolveMoonshotThinkingType() { _w('resolveMoonshotThinkingType'); return undefined; }
 export function streamWithPayloadPatch() { _w('streamWithPayloadPatch'); return undefined; }
+export function stripTrailingAnthropicAssistantPrefillWhenThinking() { _w('stripTrailingAnthropicAssistantPrefillWhenThinking'); return ""; }
 export function createAnthropicToolPayloadCompatibilityWrapper() { _w('createAnthropicToolPayloadCompatibilityWrapper'); return undefined; }
 export function createOpenAIAnthropicToolPayloadCompatibilityWrapper() { _w('createOpenAIAnthropicToolPayloadCompatibilityWrapper'); return undefined; }
 export function createGoogleThinkingPayloadWrapper() { _w('createGoogleThinkingPayloadWrapper'); return undefined; }

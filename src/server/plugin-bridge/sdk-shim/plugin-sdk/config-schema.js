@@ -8,3 +8,4 @@ function _w(fn) {
 }
 
 export const OpenClawSchema = undefined;
+export function validateJsonSchemaValue() { _w('validateJsonSchemaValue'); return undefined; }

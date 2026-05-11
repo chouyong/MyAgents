@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./agent-runtime.auto.js";
+// === END AUTO-AUGMENT ===
+
 /**
  * Shim for openclaw/plugin-sdk/agent-runtime
  * Source: openclaw/src/plugin-sdk/agent-runtime.ts

@@ -15,6 +15,7 @@ export function touchConversationBindingRecord() { _w('touchConversationBindingR
 export function unbindConversationBindingRecord() { _w('unbindConversationBindingRecord'); return undefined; }
 export function ensureConfiguredBindingRouteReady() { _w('ensureConfiguredBindingRouteReady'); return undefined; }
 export function resolveConfiguredBindingRoute() { _w('resolveConfiguredBindingRoute'); return undefined; }
+export function resolveRuntimeConversationBindingRoute() { _w('resolveRuntimeConversationBindingRoute'); return undefined; }
 export function primeConfiguredBindingRegistry() { _w('primeConfiguredBindingRegistry'); return undefined; }
 export function resolveConfiguredBinding() { _w('resolveConfiguredBinding'); return undefined; }
 export function resolveConfiguredBindingRecord() { _w('resolveConfiguredBindingRecord'); return undefined; }

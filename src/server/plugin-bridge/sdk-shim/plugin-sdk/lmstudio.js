@@ -26,7 +26,7 @@ export function discoverLmstudioModels() { _w('discoverLmstudioModels'); return 
 export function ensureLmstudioModelLoaded() { _w('ensureLmstudioModelLoaded'); return undefined; }
 export function fetchLmstudioModels() { _w('fetchLmstudioModels'); return undefined; }
 export function mapLmstudioWireEntry() { _w('mapLmstudioWireEntry'); return undefined; }
-export const normalizeLmstudioProviderConfig = undefined;
+export function normalizeLmstudioProviderConfig() { _w('normalizeLmstudioProviderConfig'); return ""; }
 export function resolveLoadedContextWindow() { _w('resolveLoadedContextWindow'); return undefined; }
 export function resolveLmstudioConfiguredApiKey() { _w('resolveLmstudioConfiguredApiKey'); return undefined; }
 export function resolveLmstudioInferenceBase() { _w('resolveLmstudioInferenceBase'); return undefined; }

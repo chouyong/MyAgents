@@ -9,4 +9,3 @@ function _w(fn) {
 
 export function isMemoryMultimodalEnabled() { _w('isMemoryMultimodalEnabled'); return false; }
 export function normalizeMemoryMultimodalSettings() { _w('normalizeMemoryMultimodalSettings'); return ""; }
-export function supportsMemoryMultimodalEmbeddings() { _w('supportsMemoryMultimodalEmbeddings'); return false; }

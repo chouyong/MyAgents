@@ -11,8 +11,9 @@ export function collectProviderDangerousNameMatchingScopes() { _w('collectProvid
 export function asObjectRecord() { _w('asObjectRecord'); return undefined; }
 export function hasLegacyAccountStreamingAliases() { _w('hasLegacyAccountStreamingAliases'); return false; }
 export function hasLegacyStreamingAliases() { _w('hasLegacyStreamingAliases'); return false; }
+export function normalizeLegacyChannelAliases() { _w('normalizeLegacyChannelAliases'); return ""; }
 export function normalizeLegacyDmAliases() { _w('normalizeLegacyDmAliases'); return ""; }
 export function normalizeLegacyStreamingAliases() { _w('normalizeLegacyStreamingAliases'); return ""; }
 export function detectPluginInstallPathIssue() { _w('detectPluginInstallPathIssue'); return undefined; }
 export function formatPluginInstallPathIssue() { _w('formatPluginInstallPathIssue'); return ""; }
-export const removePluginFromConfig = undefined;
+export function removePluginFromConfig() { _w('removePluginFromConfig'); return undefined; }

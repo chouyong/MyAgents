@@ -9,7 +9,8 @@ function _w(fn) {
 
 export function buildOptionalSecretInputSchema() { _w('buildOptionalSecretInputSchema'); return undefined; }
 export function buildSecretInputArraySchema() { _w('buildSecretInputArraySchema'); return undefined; }
-export const buildSecretInputSchema = undefined;
+export function buildSecretInputSchema() { _w('buildSecretInputSchema'); return undefined; }
+export function coerceSecretRef() { _w('coerceSecretRef'); return undefined; }
 export function hasConfiguredSecretInput() { _w('hasConfiguredSecretInput'); return false; }
 export function isSecretRef() { _w('isSecretRef'); return false; }
 export function resolveSecretInputString() { _w('resolveSecretInputString'); return undefined; }

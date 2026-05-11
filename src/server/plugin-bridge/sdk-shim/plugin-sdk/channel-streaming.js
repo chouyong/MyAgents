@@ -12,5 +12,6 @@ export function resolveChannelStreamingChunkMode() { _w('resolveChannelStreaming
 export function resolveChannelStreamingBlockEnabled() { _w('resolveChannelStreamingBlockEnabled'); return undefined; }
 export function resolveChannelStreamingBlockCoalesce() { _w('resolveChannelStreamingBlockCoalesce'); return undefined; }
 export function resolveChannelStreamingPreviewChunk() { _w('resolveChannelStreamingPreviewChunk'); return undefined; }
+export function resolveChannelStreamingPreviewToolProgress() { _w('resolveChannelStreamingPreviewToolProgress'); return undefined; }
 export function resolveChannelStreamingNativeTransport() { _w('resolveChannelStreamingNativeTransport'); return undefined; }
 export function resolveChannelPreviewStreamMode() { _w('resolveChannelPreviewStreamMode'); return undefined; }

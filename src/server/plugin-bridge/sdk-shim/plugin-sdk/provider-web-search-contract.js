@@ -10,9 +10,9 @@ function _w(fn) {
 export function createWebSearchProviderContractFields() { _w('createWebSearchProviderContractFields'); return undefined; }
 export function getScopedCredentialValue() { _w('getScopedCredentialValue'); return undefined; }
 export function getTopLevelCredentialValue() { _w('getTopLevelCredentialValue'); return undefined; }
-export const mergeScopedSearchConfig = undefined;
-export const resolveProviderWebSearchPluginConfig = undefined;
+export function mergeScopedSearchConfig() { _w('mergeScopedSearchConfig'); return undefined; }
+export function resolveProviderWebSearchPluginConfig() { _w('resolveProviderWebSearchPluginConfig'); return undefined; }
 export function setScopedCredentialValue() { _w('setScopedCredentialValue'); return undefined; }
 export function setProviderWebSearchPluginConfigValue() { _w('setProviderWebSearchPluginConfigValue'); return undefined; }
 export function setTopLevelCredentialValue() { _w('setTopLevelCredentialValue'); return undefined; }
-export const enablePluginInConfig = undefined;
+export function enablePluginInConfig() { _w('enablePluginInConfig'); return undefined; }

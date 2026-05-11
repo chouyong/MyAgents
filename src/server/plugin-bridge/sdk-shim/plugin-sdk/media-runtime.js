@@ -12,10 +12,11 @@ export function normalizeMediaProviderId() { _w('normalizeMediaProviderId'); ret
 export function createDirectTextMediaOutbound() { _w('createDirectTextMediaOutbound'); return undefined; }
 export function createScopedChannelMediaMaxBytesResolver() { _w('createScopedChannelMediaMaxBytesResolver'); return undefined; }
 export function resolveScopedChannelMediaMaxBytes() { _w('resolveScopedChannelMediaMaxBytes'); return undefined; }
-export function isTelegramVoiceCompatibleAudio() { _w('isTelegramVoiceCompatibleAudio'); return false; }
+export function isVoiceMessageCompatibleAudio() { _w('isVoiceMessageCompatibleAudio'); return false; }
 export function isVoiceCompatibleAudio() { _w('isVoiceCompatibleAudio'); return false; }
-export const TELEGRAM_VOICE_AUDIO_EXTENSIONS = undefined;
-export const TELEGRAM_VOICE_MIME_TYPES = undefined;
+export const VOICE_MESSAGE_AUDIO_EXTENSIONS = undefined;
+export const VOICE_MESSAGE_MIME_TYPES = undefined;
+export async function transcodeAudioBufferToOpus() { _w('transcodeAudioBufferToOpus'); return undefined; }
 export function estimateBase64DecodedBytes() { _w('estimateBase64DecodedBytes'); return undefined; }
 export function canonicalizeBase64() { _w('canonicalizeBase64'); return undefined; }
 export function mediaKindFromMime() { _w('mediaKindFromMime'); return undefined; }
@@ -60,6 +61,7 @@ export function getAgentScopedMediaLocalRoots() { _w('getAgentScopedMediaLocalRo
 export function appendLocalMediaParentRoots() { _w('appendLocalMediaParentRoots'); return undefined; }
 export function getAgentScopedMediaLocalRootsForSources() { _w('getAgentScopedMediaLocalRootsForSources'); return undefined; }
 export function normalizeMimeType() { _w('normalizeMimeType'); return ""; }
+export function sliceMimeSniffBuffer() { _w('sliceMimeSniffBuffer'); return undefined; }
 export function getFileExtension() { _w('getFileExtension'); return undefined; }
 export function mimeTypeFromFilePath() { _w('mimeTypeFromFilePath'); return undefined; }
 export function isAudioFileName() { _w('isAudioFileName'); return false; }
@@ -68,12 +70,17 @@ export function extensionForMime() { _w('extensionForMime'); return undefined; }
 export function isGifMedia() { _w('isGifMedia'); return false; }
 export function imageMimeFromFormat() { _w('imageMimeFromFormat'); return undefined; }
 export function kindFromMime() { _w('kindFromMime'); return undefined; }
+export const FILE_TYPE_SNIFF_MAX_BYTES = undefined;
 export async function resolveOutboundAttachmentFromUrl() { _w('resolveOutboundAttachmentFromUrl'); return undefined; }
 export function crc32() { _w('crc32'); return undefined; }
 export function pngChunk() { _w('pngChunk'); return undefined; }
 export function fillPixel() { _w('fillPixel'); return undefined; }
 export function encodePngRgba() { _w('encodePngRgba'); return ""; }
 export async function renderQrPngBase64() { _w('renderQrPngBase64'); return undefined; }
+export async function renderQrPngDataUrl() { _w('renderQrPngDataUrl'); return undefined; }
+export async function writeQrPngTempFile() { _w('writeQrPngTempFile'); return undefined; }
+export function formatQrPngDataUrl() { _w('formatQrPngDataUrl'); return ""; }
+export async function renderQrTerminal() { _w('renderQrTerminal'); return undefined; }
 export async function readResponseWithLimit() { _w('readResponseWithLimit'); return undefined; }
 export async function readResponseTextSnippet() { _w('readResponseTextSnippet'); return undefined; }
 export async function ensureMediaDir() { _w('ensureMediaDir'); return undefined; }
@@ -104,6 +111,8 @@ export const DEFAULT_MEDIA_CONCURRENCY = undefined;
 export const MIN_AUDIO_FILE_BYTES = undefined;
 export const describeImageWithModel = undefined;
 export const describeImagesWithModel = undefined;
+export const describeImageWithModelPayloadTransform = undefined;
+export const describeImagesWithModelPayloadTransform = undefined;
 export async function resolveAutoImageModel() { _w('resolveAutoImageModel'); return undefined; }
 export async function runCapability() { _w('runCapability'); return undefined; }
 export function buildProviderRegistry() { _w('buildProviderRegistry'); return undefined; }

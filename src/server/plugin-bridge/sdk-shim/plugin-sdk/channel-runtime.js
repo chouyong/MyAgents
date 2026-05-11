@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-runtime.auto.js";
+// === END AUTO-AUGMENT ===
+
 /** Shim for openclaw/plugin-sdk/channel-runtime */
 
 // --- Re-exports from channels/chat-type ---

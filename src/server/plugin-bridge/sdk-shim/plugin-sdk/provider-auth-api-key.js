@@ -15,7 +15,7 @@ export function ensureApiKeyFromOptionEnvOrPrompt() { _w('ensureApiKeyFromOption
 export function normalizeSecretInputModeInput() { _w('normalizeSecretInputModeInput'); return ""; }
 export function promptSecretRefForSetup() { _w('promptSecretRefForSetup'); return undefined; }
 export function resolveSecretInputModeForEnvSelection() { _w('resolveSecretInputModeForEnvSelection'); return undefined; }
-export const applyAuthProfileConfig = undefined;
+export function applyAuthProfileConfig() { _w('applyAuthProfileConfig'); return undefined; }
 export function buildApiKeyCredential() { _w('buildApiKeyCredential'); return undefined; }
 export function upsertApiKeyProfile() { _w('upsertApiKeyProfile'); return undefined; }
 export function createProviderApiKeyAuthMethod() { _w('createProviderApiKeyAuthMethod'); return undefined; }

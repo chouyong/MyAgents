@@ -10,3 +10,4 @@ function _w(fn) {
 export function resolveOAuthDir() { _w('resolveOAuthDir'); return undefined; }
 export function resolveStateDir() { _w('resolveStateDir'); return undefined; }
 export const STATE_DIR = undefined;
+export function resolveRequiredHomeDir() { _w('resolveRequiredHomeDir'); return undefined; }

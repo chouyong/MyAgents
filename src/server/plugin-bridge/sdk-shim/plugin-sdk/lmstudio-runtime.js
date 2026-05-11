@@ -29,4 +29,5 @@ export const ensureLmstudioModelLoaded = undefined;
 export const buildLmstudioAuthHeaders = undefined;
 export const resolveLmstudioConfiguredApiKey = undefined;
 export const resolveLmstudioProviderHeaders = undefined;
+export const resolveLmstudioRequestContext = undefined;
 export const resolveLmstudioRuntimeApiKey = undefined;

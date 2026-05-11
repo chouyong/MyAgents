@@ -7,6 +7,7 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/plugin-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function getPluginRuntimeGatewayRequestScope() { _w('getPluginRuntimeGatewayRequestScope'); return undefined; }
 export async function executePluginCommand() { _w('executePluginCommand'); return undefined; }
 export function matchPluginCommand() { _w('matchPluginCommand'); return undefined; }
 export function listPluginCommands() { _w('listPluginCommands'); return []; }
@@ -31,11 +32,14 @@ export async function dispatchPluginInteractiveHandler() { _w('dispatchPluginInt
 export function clearPluginInteractiveHandlers() { _w('clearPluginInteractiveHandlers'); return undefined; }
 export function clearPluginInteractiveHandlersForPlugin() { _w('clearPluginInteractiveHandlersForPlugin'); return undefined; }
 export function registerPluginInteractiveHandler() { _w('registerPluginInteractiveHandler'); return undefined; }
+export async function defaultLoadOverrideModule() { _w('defaultLoadOverrideModule'); return undefined; }
 export async function startLazyPluginServiceModule() { _w('startLazyPluginServiceModule'); return undefined; }
 export const PLUGIN_HOOK_NAMES = undefined;
 export const isPluginHookName = undefined;
 export const PROMPT_INJECTION_HOOK_NAMES = undefined;
 export const isPromptInjectionHookName = undefined;
+export const CONVERSATION_HOOK_NAMES = undefined;
+export const isConversationHookName = undefined;
 export const PluginApprovalResolutions = undefined;
 export const PLUGIN_PROMPT_MUTATION_RESULT_FIELDS = undefined;
 export function stripPromptMutationFieldsFromLegacyHookResult() { _w('stripPromptMutationFieldsFromLegacyHookResult'); return ""; }

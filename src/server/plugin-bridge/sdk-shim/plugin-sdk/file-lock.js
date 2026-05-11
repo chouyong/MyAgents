@@ -11,3 +11,4 @@ export async function drainFileLockStateForTest() { _w('drainFileLockStateForTes
 export async function acquireFileLock() { _w('acquireFileLock'); return undefined; }
 export async function withFileLock() { _w('withFileLock'); return undefined; }
 export function resetFileLockStateForTest() { _w('resetFileLockStateForTest'); return undefined; }
+export const FILE_LOCK_TIMEOUT_ERROR_CODE = undefined;

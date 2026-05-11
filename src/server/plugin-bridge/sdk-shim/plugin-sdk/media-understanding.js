@@ -8,7 +8,9 @@ function _w(fn) {
 }
 
 export function describeImageWithModel() { _w('describeImageWithModel'); return undefined; }
+export function describeImageWithModelPayloadTransform() { _w('describeImageWithModelPayloadTransform'); return undefined; }
 export function describeImagesWithModel() { _w('describeImagesWithModel'); return undefined; }
+export function describeImagesWithModelPayloadTransform() { _w('describeImagesWithModelPayloadTransform'); return undefined; }
 export function buildOpenAiCompatibleVideoRequestBody() { _w('buildOpenAiCompatibleVideoRequestBody'); return undefined; }
 export function coerceOpenAiCompatibleVideoText() { _w('coerceOpenAiCompatibleVideoText'); return undefined; }
 export function resolveMediaUnderstandingString() { _w('resolveMediaUnderstandingString'); return undefined; }

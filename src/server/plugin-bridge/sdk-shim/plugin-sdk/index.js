@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./index.auto.js";
+// === END AUTO-AUGMENT ===
+
 // OpenClaw plugin-sdk root shim for MyAgents Plugin Bridge
 // Covers all runtime symbols imported by installed plugins from 'openclaw/plugin-sdk'
 

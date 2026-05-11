@@ -11,3 +11,4 @@ export function canonicalizeRealtimeTranscriptionProviderId() { _w('canonicalize
 export function getRealtimeTranscriptionProvider() { _w('getRealtimeTranscriptionProvider'); return undefined; }
 export function listRealtimeTranscriptionProviders() { _w('listRealtimeTranscriptionProviders'); return []; }
 export function normalizeRealtimeTranscriptionProviderId() { _w('normalizeRealtimeTranscriptionProviderId'); return ""; }
+export function createRealtimeTranscriptionWebSocketSession() { _w('createRealtimeTranscriptionWebSocketSession'); return undefined; }

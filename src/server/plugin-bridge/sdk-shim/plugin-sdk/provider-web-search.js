@@ -35,8 +35,8 @@ export function withTrustedWebSearchEndpoint() { _w('withTrustedWebSearchEndpoin
 export function writeCachedSearchPayload() { _w('writeCachedSearchPayload'); return undefined; }
 export function getScopedCredentialValue() { _w('getScopedCredentialValue'); return undefined; }
 export function getTopLevelCredentialValue() { _w('getTopLevelCredentialValue'); return undefined; }
-export const mergeScopedSearchConfig = undefined;
-export const resolveProviderWebSearchPluginConfig = undefined;
+export function mergeScopedSearchConfig() { _w('mergeScopedSearchConfig'); return undefined; }
+export function resolveProviderWebSearchPluginConfig() { _w('resolveProviderWebSearchPluginConfig'); return undefined; }
 export function setScopedCredentialValue() { _w('setScopedCredentialValue'); return undefined; }
 export function setProviderWebSearchPluginConfigValue() { _w('setProviderWebSearchPluginConfigValue'); return undefined; }
 export function setTopLevelCredentialValue() { _w('setTopLevelCredentialValue'); return undefined; }
@@ -52,6 +52,6 @@ export function readResponseText() { _w('readResponseText'); return undefined; }
 export function resolveCacheTtlMs() { _w('resolveCacheTtlMs'); return undefined; }
 export function resolveTimeoutSeconds() { _w('resolveTimeoutSeconds'); return undefined; }
 export function writeCache() { _w('writeCache'); return undefined; }
-export const enablePluginInConfig = undefined;
+export function enablePluginInConfig() { _w('enablePluginInConfig'); return undefined; }
 export function formatCliCommand() { _w('formatCliCommand'); return ""; }
 export function wrapWebContent() { _w('wrapWebContent'); return undefined; }

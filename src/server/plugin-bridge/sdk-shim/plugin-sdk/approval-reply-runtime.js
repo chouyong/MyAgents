@@ -12,6 +12,7 @@ export function buildExecApprovalActionDescriptors() { _w('buildExecApprovalActi
 export function buildExecApprovalPendingReplyPayload() { _w('buildExecApprovalPendingReplyPayload'); return undefined; }
 export function getExecApprovalApproverDmNoticeText() { _w('getExecApprovalApproverDmNoticeText'); return undefined; }
 export function getExecApprovalReplyMetadata() { _w('getExecApprovalReplyMetadata'); return undefined; }
+export function parseExecApprovalCommandText() { _w('parseExecApprovalCommandText'); return undefined; }
 export function resolveExecApprovalCommandDisplay() { _w('resolveExecApprovalCommandDisplay'); return undefined; }
 export function resolveExecApprovalAllowedDecisions() { _w('resolveExecApprovalAllowedDecisions'); return undefined; }
 export function resolveExecApprovalRequestAllowedDecisions() { _w('resolveExecApprovalRequestAllowedDecisions'); return undefined; }

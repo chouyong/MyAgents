@@ -22,6 +22,6 @@ export function readResponseText() { _w('readResponseText'); return undefined; }
 export function resolveCacheTtlMs() { _w('resolveCacheTtlMs'); return undefined; }
 export function resolveTimeoutSeconds() { _w('resolveTimeoutSeconds'); return undefined; }
 export function writeCache() { _w('writeCache'); return undefined; }
-export const enablePluginInConfig = undefined;
+export function enablePluginInConfig() { _w('enablePluginInConfig'); return undefined; }
 export function wrapExternalContent() { _w('wrapExternalContent'); return undefined; }
 export function wrapWebContent() { _w('wrapWebContent'); return undefined; }

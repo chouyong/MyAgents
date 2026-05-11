@@ -7,7 +7,11 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/hook-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function initializeGlobalHookRunner() { _w('initializeGlobalHookRunner'); return undefined; }
+export function resetGlobalHookRunner() { _w('resetGlobalHookRunner'); return undefined; }
+export function formatHookErrorForLog() { _w('formatHookErrorForLog'); return ""; }
 export function fireAndForgetHook() { _w('fireAndForgetHook'); return undefined; }
+export function fireAndForgetBoundedHook() { _w('fireAndForgetBoundedHook'); return undefined; }
 export async function triggerInternalHook() { _w('triggerInternalHook'); return undefined; }
 export function registerInternalHook() { _w('registerInternalHook'); return undefined; }
 export function unregisterInternalHook() { _w('unregisterInternalHook'); return undefined; }

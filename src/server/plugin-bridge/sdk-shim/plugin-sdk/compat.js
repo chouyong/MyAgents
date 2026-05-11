@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./compat.auto.js";
+// === END AUTO-AUGMENT ===
+
 // OpenClaw plugin-sdk/compat shim for MyAgents Plugin Bridge
 // compat.ts re-exports from index.ts — we only need the symbols the Feishu plugin actually imports.
 

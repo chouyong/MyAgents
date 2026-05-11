@@ -7,6 +7,7 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/channel-reply-pipeline.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function resolveChannelSourceReplyDeliveryMode() { _w('resolveChannelSourceReplyDeliveryMode'); return undefined; }
 export function createChannelReplyPipeline() { _w('createChannelReplyPipeline'); return undefined; }
 export function createReplyPrefixContext() { _w('createReplyPrefixContext'); return undefined; }
 export function createReplyPrefixOptions() { _w('createReplyPrefixOptions'); return undefined; }

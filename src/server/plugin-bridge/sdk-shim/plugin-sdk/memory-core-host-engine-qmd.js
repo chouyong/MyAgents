@@ -11,6 +11,9 @@ export function extractKeywords() { _w('extractKeywords'); return undefined; }
 export function isQueryStopWordToken() { _w('isQueryStopWordToken'); return false; }
 export function buildSessionEntry() { _w('buildSessionEntry'); return undefined; }
 export function listSessionFilesForAgent() { _w('listSessionFilesForAgent'); return []; }
+export function loadDreamingNarrativeTranscriptPathSetForAgent() { _w('loadDreamingNarrativeTranscriptPathSetForAgent'); return undefined; }
+export function loadSessionTranscriptClassificationForAgent() { _w('loadSessionTranscriptClassificationForAgent'); return undefined; }
+export function normalizeSessionTranscriptPathForComparison() { _w('normalizeSessionTranscriptPathForComparison'); return ""; }
 export function sessionPathForFile() { _w('sessionPathForFile'); return undefined; }
 export function parseUsageCountedSessionIdFromFileName() { _w('parseUsageCountedSessionIdFromFileName'); return undefined; }
 export function parseQmdQueryJson() { _w('parseQmdQueryJson'); return undefined; }

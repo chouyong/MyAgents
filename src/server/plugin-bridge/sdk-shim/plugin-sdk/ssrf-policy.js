@@ -11,6 +11,7 @@ export async function assertHttpUrlTargetsPrivateNetwork() { _w('assertHttpUrlTa
 export function isPrivateNetworkOptInEnabled() { _w('isPrivateNetworkOptInEnabled'); return false; }
 export function ssrfPolicyFromPrivateNetworkOptIn() { _w('ssrfPolicyFromPrivateNetworkOptIn'); return undefined; }
 export function ssrfPolicyFromDangerouslyAllowPrivateNetwork() { _w('ssrfPolicyFromDangerouslyAllowPrivateNetwork'); return undefined; }
+export function mergeSsrFPolicies() { _w('mergeSsrFPolicies'); return undefined; }
 export function hasLegacyFlatAllowPrivateNetworkAlias() { _w('hasLegacyFlatAllowPrivateNetworkAlias'); return false; }
 export function migrateLegacyFlatAllowPrivateNetworkAlias() { _w('migrateLegacyFlatAllowPrivateNetworkAlias'); return undefined; }
 export function createLegacyPrivateNetworkDoctorContract() { _w('createLegacyPrivateNetworkDoctorContract'); return undefined; }
