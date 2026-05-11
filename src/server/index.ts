@@ -8457,6 +8457,19 @@ description: >
       if (pathname === '/api/memory/update' && request.method === 'POST') {
         try {
           const payload = await request.json() as { source: 'auto' | 'manual' };
+          const isAuto = payload.source === 'auto';
+
+          // (issue #190 v0.2.15) Busy gate — refuse auto-injection when the
+          // session is actively working. The Rust-side `lastActiveAt` cooldown
+          // is only a disk-timestamp proxy and ages past its 15-min threshold
+          // during a single long turn, so this check is the authoritative one.
+          // Manual updates (user clicked the button) bypass — explicit user
+          // intent is allowed to queue behind the active turn as expected.
+          const { isSessionBusy, enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
+          if (isAuto && isSessionBusy()) {
+            console.log('[memory-update] Skipped: session busy (auto)');
+            return jsonResponse({ status: 'skipped', reason: 'session_busy' });
+          }
 
           // Read UPDATE_MEMORY.md from workspace root
           const updateMdPath = join(currentAgentDir, 'UPDATE_MEMORY.md');
@@ -8481,8 +8494,6 @@ description: >
           });
 
           const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
-
-          const { enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
 
           // Inject as user message — memory update is unattended, bypass all permissions
           // so Bash/file tools (git commit, file writes) don't block waiting for approval.

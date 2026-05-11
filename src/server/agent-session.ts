@@ -1187,6 +1187,45 @@ const pendingMidTurnQueue: Array<{
 }> = [];
 
 /**
+ * Is the session currently busy (any signal of work in flight)?
+ *
+ * Used by **auto-injection endpoints** (memory-update, future heartbeat
+ * variants) to refuse injecting `<system-reminder>` content while the user
+ * is actively engaging — those injections trip the SDK's mid-turn
+ * `queued_command` mechanism and the prompt design directs the AI to drop
+ * its current turn and process the injected request, which is exactly the
+ * complaint in issue #190 ("memory update interrupts long-running tasks").
+ *
+ * Returns true when ANY of:
+ *   - `sessionState !== 'idle'` (running / starting / error — turn or
+ *     subprocess transitioning)
+ *   - `isStreamingMessage` (defensive — assistant text/tool stream live)
+ *   - `messageQueue.length > 0` (user direct-send waiting to start a turn)
+ *   - `pendingMidTurnQueue.length > 0` (mid-turn item buffered for replay)
+ *
+ * Pre-warm exception: `isPreWarming=true` is **not** treated as busy.
+ * Pre-warm sessions are cold/idle (sessionState stays 'idle' for the
+ * pre-warm path) and accepting an auto-injection during pre-warm just
+ * means the first message the live session processes is the injection —
+ * that is the ideal time to update memory, not a regression.
+ *
+ * Single source of truth for "is this session safe to auto-inject":
+ * called from `/api/memory/update` (and may be reused by future injection
+ * endpoints) so the gate is evaluated by the process that actually owns
+ * the state, not via stale disk-timestamp proxies (see `lastActiveAt`
+ * gate in `memory_update.rs::run_batch` — it only updates on turn
+ * boundaries, so a single multi-minute turn ages past the 15-min cooldown
+ * even though the session is plainly mid-work; that's how #190 slipped
+ * through every existing gate).
+ */
+export function isSessionBusy(): boolean {
+  return sessionState !== 'idle'
+    || isStreamingMessage
+    || messageQueue.length > 0
+    || pendingMidTurnQueue.length > 0;
+}
+
+/**
  * Rescue pending mid-turn items back to messageQueue front when the SDK subprocess
  * is about to die (abortPersistentSession or interruptCurrentResponse hard-kill).
  *
