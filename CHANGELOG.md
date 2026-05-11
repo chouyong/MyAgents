@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.15] - 2026-05-12
+
+> 长对话回溯、长任务执行、Codex 工具图片三条常见路径的可靠性收紧；外部 Runtime、Windows 下的几条阻塞性问题一并处理。
+
+### Added
+
+- **Codex Runtime 现在能渲染工具返回的图片**：让 Codex 用 OpenAI 官方 `image_generation` 工具画图、调返回图片的 MCP 工具、走 dynamic tool 拿回图片等场景，之前在 Chat 里完全不显示。现在与 builtin runtime 行为一致，附件随会话历史持久化，reload 后仍可看。顺带把 webSearch / fileChange / plan / review mode 等几个长期被静默丢弃的 Codex 事件类型补齐。
+
+### Fixed
+
+- **长对话里的时间回溯真的能回溯了**（#189）：40+ 条消息的对话里中断 AI 后再 Retry / 回溯时，过去回溯失败会把整个 session 重建——UI 顶部少几条但 AI 把之前的对话**全部忘光**。Fork 出来后立即回溯也是同样：UI 截断生效，AI 仍按完整 source 内容回复。两条路径都已修，回溯后 AI 看到的就是用户在 UI 上看到的。
+- **长任务不再被记忆维护打断**（#190）：写作 / 研究 / 长工具调用进行中时，自动记忆维护会插一条指令把 AI 切走、半路回一句 "MEMORY_UPDATE_OK"。现在会话进行中时自动记忆维护会跳过，等空闲后再补做；手动触发不受影响。
+- **外部 Runtime 长 turn 不再误报"AI 调用失败：网络错误"**（#188）：Codex / Gemini 跑 2 分钟以上的 turn 时桌面端会假性报错——AI 还在干活，只是前端等不到。
+- **Windows 上 Claude Code CLI runtime 不再丢上下文**：之前 Windows 切到 Claude Code CLI runtime 后，每条消息都开新 session 导致多轮对话失忆。
+- **元宝等 OpenClaw 插件升级后启动不再报缺接口**（#187）：插件升级后频繁出现 "does not provide an export named X"、bridge 启动超时——这次从生成器层做结构性修复，未来同类升级不再触发同样的失败。
+- **点开 user-level skill / command 的文件不再误报"文件预览失败"**：在工作区里点开 `.claude/skills/<skill>/SKILL.md` 等通过 junction 链接到 `~/.myagents/skills` 的文件能正常预览。Windows 上尤其常见。
+- **文件预览快速点击不再错位**：工作区面板里连点两个文件不再"看到的是先点的那个"，错误提示也不再双弹。
+- **代码块行号不再被选中/复制**：跨多行框选代码时不再把左侧行号带上。
+
+### Changed
+
+- **想法输入框默认更高**：Task Center 的「想法」输入区默认高度由 2 行提升到 3 行，更适合写完整想法。
+
+---
+
 ## [0.2.14] - 2026-05-11
 
 > Session 当前由谁在驱动一目了然，对话能在桌面 ↔ 飞书/Telegram/微信之间无缝流转；顺手把通知系统、Plan 模式、IM 配置变更几条最痛的 papercut 都处理了。
