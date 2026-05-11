@@ -8,9 +8,9 @@ function _w(fn) {
 }
 
 export const AllowFromListSchema = undefined;
-export const buildChannelConfigSchema = undefined;
-export const buildCatchallMultiAccountChannelSchema = undefined;
-export const buildNestedDmConfigSchema = undefined;
+export function buildChannelConfigSchema() { _w('buildChannelConfigSchema'); return undefined; }
+export function buildCatchallMultiAccountChannelSchema() { _w('buildCatchallMultiAccountChannelSchema'); return undefined; }
+export function buildNestedDmConfigSchema() { _w('buildNestedDmConfigSchema'); return undefined; }
 export const BlockStreamingCoalesceSchema = undefined;
 export const DmConfigSchema = undefined;
 export const DmPolicySchema = undefined;

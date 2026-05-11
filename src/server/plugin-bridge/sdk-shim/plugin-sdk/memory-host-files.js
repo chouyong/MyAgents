@@ -10,4 +10,4 @@ function _w(fn) {
 export function listMemoryFiles() { _w('listMemoryFiles'); return []; }
 export function normalizeExtraMemoryPaths() { _w('normalizeExtraMemoryPaths'); return ""; }
 export function readAgentMemoryFile() { _w('readAgentMemoryFile'); return undefined; }
-export const resolveMemoryBackendConfig = undefined;
+export function resolveMemoryBackendConfig() { _w('resolveMemoryBackendConfig'); return undefined; }

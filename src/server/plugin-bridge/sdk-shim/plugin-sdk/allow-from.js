@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./allow-from.auto.js";
+// === END AUTO-AUGMENT ===
+
 /** Shim for openclaw/plugin-sdk/allow-from */
 
 // --- Re-exports from channels/allowlist-match ---

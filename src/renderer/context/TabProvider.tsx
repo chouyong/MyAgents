@@ -152,6 +152,30 @@ async function handleApiResponse<T>(response: Response): Promise<T> {
  * @param tabId - Tab identifier
  * @param sessionId - Session identifier (optional, for Session-centric lookup)
  */
+/**
+ * Merge `incoming` ToolAttachment array into `existing`, preserving any entries
+ * in `existing` that have already been resolved (no pendingId, or pendingId
+ * present but refPath populated) when the corresponding `incoming` entry is
+ * still a placeholder. Codex review SM1.
+ *
+ * Identity key: `pendingId` if present; falls back to `refPath` if not.
+ */
+function mergeAttachmentsByPendingId(
+    existing: import('@/types/chat').ToolAttachment[] | undefined,
+    incoming: import('@/types/chat').ToolAttachment[] | undefined,
+): import('@/types/chat').ToolAttachment[] | undefined {
+    if (!incoming) return existing;
+    if (!existing) return incoming;
+    return incoming.map(inc => {
+        const key = inc.pendingId || inc.refPath;
+        const prior = existing.find(e => (e.pendingId || e.refPath) === key);
+        // If we already have a resolved version (refPath non-empty + no pendingId),
+        // keep it instead of accepting an incoming placeholder.
+        if (prior && prior.refPath && !prior.pendingId) return prior;
+        return inc;
+    });
+}
+
 async function getBaseUrl(tabId: string, sessionId?: string | null): Promise<string> {
     // Session-centric: try to get port from sessionId first
     if (sessionId) {
@@ -1479,6 +1503,32 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:tool-attachment-update': {
+                // PRD 0.2.15 §4.7.1 — placeholder attachment fulfillment.
+                // Replace the matching pendingId entry inside the target tool's attachments array.
+                const payload = data as {
+                    toolUseId: string;
+                    pendingId: string;
+                    attachment: import('@/types/chat').ToolAttachment;
+                };
+                setStreamingMessage(prev => {
+                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+                    const contentArray = prev.content;
+                    const idx = contentArray.findIndex(b => isToolBlock(b) && b.tool?.id === payload.toolUseId);
+                    if (idx === -1) return prev;
+                    const block = contentArray[idx];
+                    if (!isToolBlock(block) || !block.tool?.attachments) return prev;
+                    const attIdx = block.tool.attachments.findIndex(a => a.pendingId === payload.pendingId);
+                    if (attIdx === -1) return prev;
+                    const newAttachments = [...block.tool.attachments];
+                    newAttachments[attIdx] = payload.attachment;
+                    const updated = [...contentArray];
+                    updated[idx] = { ...block, tool: { ...block.tool, attachments: newAttachments } };
+                    return { ...prev, content: updated };
+                });
+                break;
+            }
+
             case 'chat:tool-result-start':
             case 'chat:tool-result-complete': {
                 const payload = data as {
@@ -1486,6 +1536,7 @@ export default function TabProvider({
                     content?: string;
                     isError?: boolean;
                     metadata?: import('@/types/chat').ToolResultMeta;
+                    attachments?: import('@/types/chat').ToolAttachment[];
                 };
 
                 // Pattern 3 §3.2.2 — drain any pending RAF deltas for this tool
@@ -1505,6 +1556,13 @@ export default function TabProvider({
                     const block = contentArray[idx];
                     if (!isToolBlock(block) || !block.tool) return prev;
 
+                    // PRD 0.2.15 — merge attachments by pendingId so a tool-result-complete
+                    // restate doesn't overwrite already-resolved entries. Codex review SM1.
+                    const mergedAttachments = mergeAttachmentsByPendingId(
+                        block.tool.attachments,
+                        payload.attachments,
+                    );
+
                     const updated = [...contentArray];
                     updated[idx] = {
                         ...block,
@@ -1514,6 +1572,7 @@ export default function TabProvider({
                             isError: payload.isError,
                             isLoading: eventName !== 'chat:tool-result-complete',
                             resultMeta: payload.metadata ?? block.tool.resultMeta,
+                            attachments: mergedAttachments,
                         }
                     };
 

@@ -111,16 +111,20 @@ pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
 
 /// Stricter variant of `resolve_inside_workspace` for **read-side** commands:
 /// resolves any symlinks via `fs::canonicalize` and verifies the canonical
-/// path is still inside the canonical workspace root. Blocks the "malicious
-/// `evil_link → /etc/passwd` checked into a repo" attack from leaking content
-/// out of the workspace.
+/// path is still inside the canonical workspace root — OR inside a trusted
+/// MyAgents-managed directory (see `is_trusted_managed_target`). Blocks the
+/// "malicious `evil_link → /etc/passwd` checked into a repo" attack from
+/// leaking content out of the workspace, while still allowing the
+/// junctions / symlinks we sync ourselves from `~/.myagents/skills` etc.
+/// into `<workspace>/.claude/skills/` (see `agent-session.ts:syncProjectSkillSymlinks`).
 ///
 /// Behavior:
 /// - If the resolved path doesn't exist, returns `Err("File not found")` (the
 ///   read command was going to error anyway — surfacing the same error here
 ///   makes the failure mode uniform regardless of whether the path is missing
 ///   or rejected for being a symlink escape).
-/// - If the path exists but resolves outside the workspace via symlink, returns
+/// - If the path exists but resolves outside the workspace via symlink AND
+///   isn't under a trusted MyAgents-managed root, returns
 ///   `Err("Path escapes workspace root via symlink")`.
 /// - If the workspace root itself isn't canonicalizable (rare — race with
 ///   directory deletion), returns `Err("Workspace root canonicalize failed")`
@@ -144,11 +148,39 @@ pub fn resolve_existing_inside_workspace(workspace_root: &Path, relative: &str) 
     let canonical = fs::canonicalize(&lexical)
         .map_err(|_| "File not found".to_string())?;
 
-    if !canonical.starts_with(&canonical_root) {
+    if !canonical.starts_with(&canonical_root)
+        && !is_trusted_managed_target(&canonical, &trusted_managed_roots())
+    {
         return Err("Path escapes workspace root via symlink".to_string());
     }
 
     Ok(canonical)
+}
+
+/// Canonicalized roots of MyAgents-managed directories that we sync into
+/// workspaces via junctions/symlinks. Targets under any of these roots are
+/// safe to follow from in-workspace links because MyAgents owns the source —
+/// users can edit them through the Settings UI but they're not attacker-
+/// controlled like an arbitrary file in a cloned repo.
+///
+/// Non-existent subdirs are skipped (some users won't have `agents/` etc.
+/// yet). Result is recomputed each call rather than cached so newly-created
+/// dirs become trusted without a sidecar restart; the work is three
+/// `fs::canonicalize` calls, dwarfed by the file read that follows.
+fn trusted_managed_roots() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let myagents = home.join(".myagents");
+    ["skills", "commands", "agents"]
+        .iter()
+        .filter_map(|sub| fs::canonicalize(myagents.join(sub)).ok())
+        .collect()
+}
+
+/// Returns `true` iff `canonical` is inside one of the trusted roots. Pure
+/// function so tests can inject their own root set via [`trusted_managed_roots`]
+/// or a literal `Vec<PathBuf>`.
+fn is_trusted_managed_target(canonical: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| canonical.starts_with(root))
 }
 
 /// Reject filenames that would break on Windows or hide the file (`.`, `..`,
@@ -488,5 +520,80 @@ mod tests {
         let res = resolve_existing_inside_workspace(&ws, "broken");
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    // ── is_trusted_managed_target — Phase E skill-junction whitelist ──
+
+    #[test]
+    fn trusted_target_matches_root() {
+        let root = std::env::temp_dir().join(format!("trusted_root_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let child = canonical_root.join("baoyu-imagine").join("SKILL.md");
+        assert!(is_trusted_managed_target(&child, &[canonical_root.clone()]));
+        // Sibling-of-prefix must NOT match — `starts_with` works on path
+        // components, so `/tmp/trusted` does not pretend to contain
+        // `/tmp/trusted_evil` even though the string starts the same.
+        let evil = canonical_root.parent().unwrap().join(format!(
+            "{}_evil",
+            canonical_root.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!is_trusted_managed_target(&evil, &[canonical_root]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trusted_target_empty_roots_rejects_everything() {
+        // Defence: if `trusted_managed_roots()` returns empty (no `.myagents`
+        // dir yet), the whitelist degrades closed — `is_trusted_managed_target`
+        // returns false for any path so the original symlink-escape rejection
+        // still fires.
+        let p = Path::new("/anywhere");
+        assert!(!is_trusted_managed_target(p, &[]));
+    }
+
+    // Headline whitelist test: a junction-like symlink in the workspace
+    // pointing into a trusted root MUST resolve successfully even though the
+    // target is outside the canonical workspace. This unblocks Windows users
+    // hitting "文件预览失败" on user-level skill links synced by
+    // `agent-session.ts:syncProjectSkillSymlinks`.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_existing_allows_symlink_into_trusted_root() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_workspace();
+        // Stand in for `~/.myagents/skills/`.
+        let managed = std::env::temp_dir().join(format!(
+            "managed_skills_{}",
+            std::process::id()
+        ));
+        let managed_skill = managed.join("baoyu-imagine");
+        fs::create_dir_all(&managed_skill).unwrap();
+        let real_md = managed_skill.join("SKILL.md");
+        fs::write(&real_md, "skill content").unwrap();
+
+        // Mirror the prod symlink shape: `<ws>/.claude/skills/baoyu-imagine`
+        // points at the managed skill dir.
+        let link_parent = ws.join(".claude").join("skills");
+        fs::create_dir_all(&link_parent).unwrap();
+        symlink(&managed_skill, link_parent.join("baoyu-imagine")).unwrap();
+
+        let canonical_managed = fs::canonicalize(&managed).unwrap();
+
+        // Direct: bypass `trusted_managed_roots()` (which reads real
+        // `~/.myagents/`) and inject our tmp root via the pure helper.
+        let lexical = resolve_inside_workspace(
+            &ws,
+            ".claude/skills/baoyu-imagine/SKILL.md",
+        )
+        .unwrap();
+        let canonical = fs::canonicalize(&lexical).unwrap();
+        assert!(
+            is_trusted_managed_target(&canonical, &[canonical_managed]),
+            "skill target under managed root should be trusted: {:?}",
+            canonical
+        );
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&managed);
     }
 }

@@ -915,6 +915,28 @@ code {
   user-select: text;
 }
 
+/* Code-block gutter (line numbers) — not part of the user-visible text.
+ * react-syntax-highlighter renders these as <span class="linenumber
+ * react-syntax-highlighter-line-number">. The component already sets
+ * userSelect: 'none' inline, which excludes them from the copy buffer.
+ * But WebKit still paints the selection background when a selection range
+ * passes over them (dragging from line 2 to line 5 highlights all four
+ * gutter cells visually, as seen in user reports). Force ::selection
+ * background transparent and disable pointer events so the gutter behaves
+ * like a passive ruler. Classes only ever appear inside CodeBlock — safe
+ * to target globally. */
+.linenumber,
+.react-syntax-highlighter-line-number {
+  -webkit-user-select: none;
+  user-select: none;
+  pointer-events: none;
+}
+.linenumber::selection,
+.react-syntax-highlighter-line-number::selection {
+  background: transparent;
+  color: var(--code-line-number);
+}
+
 
 /* ── Toolbar responsive: hide text labels when container is narrow ── */
 @container (max-width: 480px) {

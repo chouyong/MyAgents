@@ -12,3 +12,4 @@ export function evaluateGroupRouteAccessForPolicy() { _w('evaluateGroupRouteAcce
 export function evaluateMatchedGroupAccessForPolicy() { _w('evaluateMatchedGroupAccessForPolicy'); return undefined; }
 export function evaluateSenderGroupAccessForPolicy() { _w('evaluateSenderGroupAccessForPolicy'); return undefined; }
 export function evaluateSenderGroupAccess() { _w('evaluateSenderGroupAccess'); return undefined; }
+export function resolveOpenProviderRuntimeGroupPolicy() { _w('resolveOpenProviderRuntimeGroupPolicy'); return undefined; }

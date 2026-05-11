@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-entry-contract.auto.js";
+// === END AUTO-AUGMENT ===
+
 // Hand-written shim for openclaw/plugin-sdk/channel-entry-contract.
 //
 // The auto-generated stub returned `undefined` from defineBundledChannelEntry,

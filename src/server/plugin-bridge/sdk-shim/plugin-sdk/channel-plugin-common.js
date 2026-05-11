@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-plugin-common.auto.js";
+// === END AUTO-AUGMENT ===
+
 // Hand-written shim for openclaw/plugin-sdk/channel-plugin-common.
 //
 // The auto-generated stub returned `undefined` for everything including
@@ -18,7 +24,6 @@ export { DEFAULT_ACCOUNT_ID, normalizeAccountId } from './account-id.js';
 import { DEFAULT_ACCOUNT_ID } from './account-id.js';
 
 export const emptyPluginConfigSchema = { type: 'object', additionalProperties: true, properties: {} };
-export const buildChannelConfigSchema = undefined;
 export const PAIRING_APPROVED_MESSAGE = 'pairing approved';
 
 export function applyAccountNameToChannelSection(_params) {

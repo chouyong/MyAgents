@@ -7,7 +7,15 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/cli-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function inheritOptionFromParent() { _w('inheritOptionFromParent'); return undefined; }
+export function runCommandWithRuntime() { _w('runCommandWithRuntime'); return undefined; }
+export function formatHelpExamples() { _w('formatHelpExamples'); return ""; }
+export function registerCommandGroups() { _w('registerCommandGroups'); return undefined; }
+export function resolveCliArgvInvocation() { _w('resolveCliArgvInvocation'); return undefined; }
+export function shouldEagerRegisterSubcommands() { _w('shouldEagerRegisterSubcommands'); return false; }
+export function note() { _w('note'); return undefined; }
 export function stylePromptTitle() { _w('stylePromptTitle'); return undefined; }
+export function theme() { _w('theme'); return undefined; }
 export function formatCliCommand() { _w('formatCliCommand'); return ""; }
 export function parseDurationMs() { _w('parseDurationMs'); return undefined; }
 export function waitForever() { _w('waitForever'); return undefined; }

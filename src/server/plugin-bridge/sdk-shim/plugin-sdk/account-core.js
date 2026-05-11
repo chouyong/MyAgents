@@ -8,14 +8,13 @@ function _w(fn) {
 }
 
 export function resolveAccountWithDefaultFallback() { _w('resolveAccountWithDefaultFallback'); return undefined; }
-export function listConfiguredAccountIds() { _w('listConfiguredAccountIds'); return []; }
 export function createAccountActionGate() { _w('createAccountActionGate'); return undefined; }
 export function createAccountListHelpers() { _w('createAccountListHelpers'); return undefined; }
 export function describeAccountSnapshot() { _w('describeAccountSnapshot'); return undefined; }
 export function listCombinedAccountIds() { _w('listCombinedAccountIds'); return []; }
-export const mergeAccountConfig = undefined;
+export function mergeAccountConfig() { _w('mergeAccountConfig'); return undefined; }
 export function resolveListedDefaultAccountId() { _w('resolveListedDefaultAccountId'); return undefined; }
-export const resolveMergedAccountConfig = undefined;
+export function resolveMergedAccountConfig() { _w('resolveMergedAccountConfig'); return undefined; }
 export function normalizeChatType() { _w('normalizeChatType'); return ""; }
 export function resolveAccountEntry() { _w('resolveAccountEntry'); return undefined; }
 export function resolveNormalizedAccountEntry() { _w('resolveNormalizedAccountEntry'); return undefined; }
@@ -25,3 +24,4 @@ export function normalizeOptionalAccountId() { _w('normalizeOptionalAccountId');
 export function normalizeE164() { _w('normalizeE164'); return ""; }
 export function pathExists() { _w('pathExists'); return undefined; }
 export function resolveUserPath() { _w('resolveUserPath'); return undefined; }
+export function listConfiguredAccountIds() { _w('listConfiguredAccountIds'); return []; }

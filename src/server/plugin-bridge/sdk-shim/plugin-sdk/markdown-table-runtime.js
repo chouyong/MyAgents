@@ -8,3 +8,4 @@ function _w(fn) {
 }
 
 export function resolveMarkdownTableMode() { _w('resolveMarkdownTableMode'); return undefined; }
+export function convertMarkdownTables() { _w('convertMarkdownTables'); return undefined; }

@@ -9,12 +9,22 @@ function _w(fn) {
 
 export function getModelProviderHint() { _w('getModelProviderHint'); return undefined; }
 export function isProxyReasoningUnsupportedModelHint() { _w('isProxyReasoningUnsupportedModelHint'); return false; }
+export function isClaudeOpus47ModelId() { _w('isClaudeOpus47ModelId'); return false; }
+export function isClaudeAdaptiveThinkingDefaultModelId() { _w('isClaudeAdaptiveThinkingDefaultModelId'); return false; }
+export function resolveClaudeThinkingProfile() { _w('resolveClaudeThinkingProfile'); return undefined; }
 export function buildProviderReplayFamilyHooks() { _w('buildProviderReplayFamilyHooks'); return undefined; }
 export const OPENAI_COMPATIBLE_REPLAY_HOOKS = undefined;
 export const ANTHROPIC_BY_MODEL_REPLAY_HOOKS = undefined;
 export const NATIVE_ANTHROPIC_REPLAY_HOOKS = undefined;
 export const PASSTHROUGH_GEMINI_REPLAY_HOOKS = undefined;
 export const DEFAULT_CONTEXT_TOKENS = undefined;
+export const GPT5_BEHAVIOR_CONTRACT = undefined;
+export const GPT5_FRIENDLY_PROMPT_OVERLAY = undefined;
+export function isGpt5ModelId() { _w('isGpt5ModelId'); return false; }
+export function normalizeGpt5PromptOverlayMode() { _w('normalizeGpt5PromptOverlayMode'); return ""; }
+export function renderGpt5PromptOverlay() { _w('renderGpt5PromptOverlay'); return undefined; }
+export function resolveGpt5PromptOverlayMode() { _w('resolveGpt5PromptOverlayMode'); return undefined; }
+export function resolveGpt5SystemPromptContribution() { _w('resolveGpt5SystemPromptContribution'); return undefined; }
 export function resolveProviderEndpoint() { _w('resolveProviderEndpoint'); return undefined; }
 export function applyModelCompatPatch() { _w('applyModelCompatPatch'); return undefined; }
 export function hasToolSchemaProfile() { _w('hasToolSchemaProfile'); return false; }

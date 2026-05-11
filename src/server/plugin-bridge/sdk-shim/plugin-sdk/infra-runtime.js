@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./infra-runtime.auto.js";
+// === END AUTO-AUGMENT ===
+
 // OpenClaw plugin-sdk/infra-runtime shim for MyAgents Plugin Bridge
 // Provides filesystem utilities: temp dir resolution, file locking.
 

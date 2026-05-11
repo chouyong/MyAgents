@@ -13,6 +13,7 @@ export async function runPassiveAccountLifecycle() { _w('runPassiveAccountLifecy
 export async function keepHttpServerTaskAlive() { _w('keepHttpServerTaskAlive'); return undefined; }
 export function createAccountStatusSink() { _w('createAccountStatusSink'); return undefined; }
 export function waitUntilAbort() { _w('waitUntilAbort'); return undefined; }
+export async function deliverFinalizableDraftPreview() { _w('deliverFinalizableDraftPreview'); return undefined; }
 export async function takeMessageIdAfterStop() { _w('takeMessageIdAfterStop'); return undefined; }
 export async function clearFinalizableDraftMessage() { _w('clearFinalizableDraftMessage'); return undefined; }
 export function createFinalizableDraftStreamControls() { _w('createFinalizableDraftStreamControls'); return undefined; }

@@ -1,3 +1,4 @@
+import type React from 'react';
 import type { ToolUseSimple } from '@/types/chat';
 
 import BashOutputTool from './tools/BashOutputTool';
@@ -14,10 +15,26 @@ import ReadTool from './tools/ReadTool';
 import SkillTool from './tools/SkillTool';
 import TaskTool from './tools/TaskTool';
 import TodoWriteTool from './tools/TodoWriteTool';
+import ToolAttachmentGallery from './tools/ToolAttachmentGallery';
 import WebFetchTool from './tools/WebFetchTool';
 import WebSearchTool from './tools/WebSearchTool';
 import WriteTool from './tools/WriteTool';
 import CronTaskCard from './scheduled-tasks/CronTaskCard';
+
+/**
+ * Tools whose specialized component already renders attachments internally.
+ * ToolUse skips the outer ToolAttachmentGallery for these to avoid duplicate
+ * image rendering. PRD 0.2.15 Review B5.
+ *
+ * Currently: GeminiImageTool consumes attachments inside its `parseToolResult`
+ * code path (it renders via filePath text bridge today; once it migrates to
+ * the attachments API in v0.2.16+, both readers will hit the same renderer).
+ */
+const TOOLS_THAT_OWN_GALLERY_PREFIXES = ['mcp__gemini-image__'];
+
+function ownsAttachmentGallery(toolName: string): boolean {
+  return TOOLS_THAT_OWN_GALLERY_PREFIXES.some(p => toolName.startsWith(p));
+}
 
 /** Parse cron tool result JSON, returning structured data for card rendering or null on failure */
 function parseCronResult(result: string): { taskId: string; name?: string; scheduleDesc?: string; nextExecutionAt?: string } | null {
@@ -60,6 +77,18 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
   // Specialized components (cron card, WebSearch, TaskTool, etc.) parse structured
   // JSON from result — clamping would corrupt the JSON and break rich UI.
   const tool = clampResult(rawTool);
+  const body = renderToolBody(tool);
+  const showGallery = tool.attachments && tool.attachments.length > 0 && !ownsAttachmentGallery(tool.name);
+  if (!showGallery) return body;
+  return (
+    <>
+      {body}
+      <ToolAttachmentGallery attachments={tool.attachments!} />
+    </>
+  );
+}
+
+function renderToolBody(tool: ToolUseSimple): React.JSX.Element {
   switch (tool.name) {
     case 'Bash':
       return <BashTool tool={tool} />;

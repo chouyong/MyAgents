@@ -10,3 +10,4 @@ function _w(fn) {
 export function getProviderEnvVars() { _w('getProviderEnvVars'); return undefined; }
 export function listKnownProviderAuthEnvVarNames() { _w('listKnownProviderAuthEnvVarNames'); return []; }
 export function omitEnvKeysCaseInsensitive() { _w('omitEnvKeysCaseInsensitive'); return undefined; }
+export function resolveProviderAuthEnvVarCandidates() { _w('resolveProviderAuthEnvVarCandidates'); return undefined; }

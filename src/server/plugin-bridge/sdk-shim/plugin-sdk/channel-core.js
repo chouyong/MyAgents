@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-core.auto.js";
+// === END AUTO-AUGMENT ===
+
 // Hand-written shim for openclaw/plugin-sdk/channel-core.
 //
 // Upstream (openclaw/src/plugin-sdk/channel-core.ts) is a barrel that re-exports
@@ -24,10 +30,3 @@ export {
   stripTargetKindPrefix,
 } from './core.js';
 
-export const buildChannelConfigSchema = undefined;
-export const buildThreadAwareOutboundSessionRoute = undefined;
-export const clearAccountEntryFields = undefined;
-export const defineSetupPluginEntry = undefined;
-export const parseOptionalDelimitedEntries = undefined;
-export const recoverCurrentThreadSessionId = undefined;
-export const tryReadSecretFileSync = undefined;

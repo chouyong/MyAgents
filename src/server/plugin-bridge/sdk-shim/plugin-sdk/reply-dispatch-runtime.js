@@ -7,7 +7,8 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/reply-dispatch-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export const dispatchReplyWithBufferedBlockDispatcher = undefined;
+export const dispatchReplyWithDispatcher = undefined;
 export function resolveChunkMode() { _w('resolveChunkMode'); return undefined; }
+export function generateConversationLabel() { _w('generateConversationLabel'); return undefined; }
 export function finalizeInboundContext() { _w('finalizeInboundContext'); return undefined; }
-export function dispatchReplyWithBufferedBlockDispatcher() { _w('dispatchReplyWithBufferedBlockDispatcher'); return undefined; }
-export function dispatchReplyWithDispatcher() { _w('dispatchReplyWithDispatcher'); return undefined; }

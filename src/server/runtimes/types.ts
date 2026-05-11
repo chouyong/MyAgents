@@ -4,6 +4,7 @@
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection } from '../../shared/types/runtime';
 import type { InteractionScenario } from '../system-prompt';
 import type { ModelUsageEntry } from '../types/session';
+import type { ToolAttachment } from '../../shared/types/tool-attachment';
 
 /**
  * Image payload from frontend (base64-encoded)
@@ -70,6 +71,14 @@ export type UnifiedEvent =
     kind: 'tool_result';
     toolUseId: string;
     content: string;
+    /**
+     * Rich-media attachments (image/audio/pdf/file). Each entry references a
+     * file already persisted by the sidecar (or a placeholder pending async
+     * save — see ToolAttachment.pendingId). Frontend renders via
+     * ToolAttachmentGallery; tool_result.content remains the human/AI-readable
+     * text summary.
+     */
+    attachments?: ToolAttachment[];
     isError?: boolean;
     metadata?: {
       exitCode?: number | null;
@@ -78,6 +87,17 @@ export type UnifiedEvent =
       processId?: string | null;
       status?: string;
     };
+  }
+  /**
+   * Async placeholder fulfillment (Review A4 of PRD 0.2.15). Emitted after
+   * tool_result, once a deferred saveToolAttachment() resolves. The frontend
+   * matches by (toolUseId, pendingId) and replaces the placeholder in-place.
+   */
+  | {
+    kind: 'tool_attachment_update';
+    toolUseId: string;
+    pendingId: string;
+    attachment: ToolAttachment;
   }
 
   // === Permission delegation ===

@@ -12,7 +12,7 @@ export function buildChannelKeyCandidates() { _w('buildChannelKeyCandidates'); r
 export function normalizeChannelSlug() { _w('normalizeChannelSlug'); return ""; }
 export function resolveChannelEntryMatch() { _w('resolveChannelEntryMatch'); return undefined; }
 export function resolveChannelEntryMatchWithFallback() { _w('resolveChannelEntryMatchWithFallback'); return undefined; }
-export const resolveChannelMatchConfig = undefined;
+export function resolveChannelMatchConfig() { _w('resolveChannelMatchConfig'); return undefined; }
 export function resolveNestedAllowlistDecision() { _w('resolveNestedAllowlistDecision'); return undefined; }
 export function buildMessagingTarget() { _w('buildMessagingTarget'); return undefined; }
 export function ensureTargetId() { _w('ensureTargetId'); return undefined; }
@@ -31,5 +31,6 @@ export function resolveServicePrefixedChatTarget() { _w('resolveServicePrefixedC
 export function resolveServicePrefixedOrChatAllowTarget() { _w('resolveServicePrefixedOrChatAllowTarget'); return undefined; }
 export function resolveServicePrefixedTarget() { _w('resolveServicePrefixedTarget'); return undefined; }
 export function normalizeChannelId() { _w('normalizeChannelId'); return ""; }
+export function resolveChannelTtsVoiceDelivery() { _w('resolveChannelTtsVoiceDelivery'); return undefined; }
 export function buildUnresolvedTargetResults() { _w('buildUnresolvedTargetResults'); return undefined; }
 export function resolveTargetsWithOptionalToken() { _w('resolveTargetsWithOptionalToken'); return undefined; }

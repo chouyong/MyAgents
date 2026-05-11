@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-config-helpers.auto.js";
+// === END AUTO-AUGMENT ===
+
 // Hand-written shim for openclaw/plugin-sdk/channel-config-helpers.
 //
 // The auto-generated stub returned `undefined` for `createScopedDmSecurityResolver`,
@@ -98,17 +104,3 @@ export function createScopedDmSecurityResolver(params) {
 export { mapAllowFromEntries } from './compat.js';
 
 // Surfaces upstream exports — kept as undefined until a plugin consumes them.
-export const resolveChannelConfigWrites = undefined;
-export const authorizeConfigWrite = undefined;
-export const canBypassConfigWritePolicy = undefined;
-export const formatConfigWriteDeniedMessage = undefined;
-export const formatTrimmedAllowFromEntries = undefined;
-export const resolveOptionalConfigString = undefined;
-export const adaptScopedAccountAccessor = undefined;
-export const createScopedAccountConfigAccessors = undefined;
-export const createScopedChannelConfigBase = undefined;
-export const createScopedChannelConfigAdapter = undefined;
-export const createTopLevelChannelConfigBase = undefined;
-export const createTopLevelChannelConfigAdapter = undefined;
-export const createHybridChannelConfigBase = undefined;
-export const createHybridChannelConfigAdapter = undefined;

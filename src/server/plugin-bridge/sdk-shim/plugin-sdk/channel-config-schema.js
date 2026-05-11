@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-config-schema.auto.js";
+// === END AUTO-AUGMENT ===
+
 // OpenClaw plugin-sdk/channel-config-schema shim for MyAgents Plugin Bridge
 // Provides buildChannelConfigSchema() — converts Zod schema to JSON Schema (or passes through).
 
@@ -49,8 +55,3 @@ export function buildNestedDmConfigSchema() {
 }
 
 // Zod schema stubs for plugins that import them
-export const AllowFromListSchema = undefined;
-export const DmPolicySchema = undefined;
-export const GroupPolicySchema = undefined;
-export const MarkdownConfigSchema = undefined;
-export const ToolPolicySchema = undefined;

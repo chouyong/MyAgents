@@ -17,5 +17,11 @@ export function requireChannelOpenAllowFrom() { _w('requireChannelOpenAllowFrom'
 export function readStatusIssueFields() { _w('readStatusIssueFields'); return undefined; }
 export function coerceStatusIssueAccountId() { _w('coerceStatusIssueAccountId'); return undefined; }
 export function createDeferred() { _w('createDeferred'); return undefined; }
-export const safeParseJsonWithSchema = undefined;
-export const safeParseWithSchema = undefined;
+export function formatPluginConfigIssue() { _w('formatPluginConfigIssue'); return ""; }
+export function normalizePluginConfigIssuePath() { _w('normalizePluginConfigIssuePath'); return ""; }
+export function mapPluginConfigIssues() { _w('mapPluginConfigIssues'); return undefined; }
+export function canResolveEnvSecretRefInReadOnlyPath() { _w('canResolveEnvSecretRefInReadOnlyPath'); return false; }
+export function readPluginPackageVersion() { _w('readPluginPackageVersion'); return undefined; }
+export function safeParseJsonWithSchema() { _w('safeParseJsonWithSchema'); return undefined; }
+export function safeParseWithSchema() { _w('safeParseWithSchema'); return undefined; }
+export function buildTimeoutAbortSignal() { _w('buildTimeoutAbortSignal'); return undefined; }

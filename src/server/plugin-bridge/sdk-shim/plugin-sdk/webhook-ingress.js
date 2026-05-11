@@ -36,4 +36,7 @@ export function withResolvedWebhookRequestPipeline() { _w('withResolvedWebhookRe
 export function normalizeWebhookPath() { _w('normalizeWebhookPath'); return ""; }
 export function resolveWebhookPath() { _w('resolveWebhookPath'); return undefined; }
 export function resolveRequestClientIp() { _w('resolveRequestClientIp'); return undefined; }
+export function createAuthRateLimiter() { _w('createAuthRateLimiter'); return undefined; }
+export function rawDataToString() { _w('rawDataToString'); return undefined; }
 export function normalizePluginHttpPath() { _w('normalizePluginHttpPath'); return ""; }
+export const DEFAULT_WEBHOOK_MAX_BODY_BYTES = undefined;

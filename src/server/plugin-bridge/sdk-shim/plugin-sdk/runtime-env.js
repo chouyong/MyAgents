@@ -30,6 +30,7 @@ export function formatDurationPrecise() { _w('formatDurationPrecise'); return ""
 export function formatDurationSeconds() { _w('formatDurationSeconds'); return ""; }
 export function retryAsync() { _w('retryAsync'); return undefined; }
 export function ensureGlobalUndiciEnvProxyDispatcher() { _w('ensureGlobalUndiciEnvProxyDispatcher'); return undefined; }
+export function registerUncaughtExceptionHandler() { _w('registerUncaughtExceptionHandler'); return undefined; }
 export function registerUnhandledRejectionHandler() { _w('registerUnhandledRejectionHandler'); return undefined; }
 export function isWSL2Sync() { _w('isWSL2Sync'); return false; }
 export function enableConsoleCapture() { _w('enableConsoleCapture'); return undefined; }

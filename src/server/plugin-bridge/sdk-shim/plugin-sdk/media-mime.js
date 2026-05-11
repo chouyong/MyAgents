@@ -11,3 +11,4 @@ export function detectMime() { _w('detectMime'); return undefined; }
 export function extensionForMime() { _w('extensionForMime'); return undefined; }
 export function getFileExtension() { _w('getFileExtension'); return undefined; }
 export function normalizeMimeType() { _w('normalizeMimeType'); return ""; }
+export function mediaKindFromMime() { _w('mediaKindFromMime'); return undefined; }

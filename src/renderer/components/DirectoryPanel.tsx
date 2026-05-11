@@ -252,6 +252,16 @@ const DirectoryPanel = memo(
     const [preview, setPreview] = useState<FilePreview | null>(null);
     const [previewError, setPreviewError] = useState<string | null>(null);
     const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+    // Monotonic counter for "latest preview request wins". Every async preview
+    // path (text preview, image preview, search-result preview) bumps this on
+    // entry and re-checks before committing state — old in-flight requests are
+    // dropped silently so a slow file's response can't overwrite the fresh
+    // click's result, double-fire toasts, or strand `isPreviewLoading=true`.
+    // React `useState` is unsuitable as a concurrency lock because state
+    // updates are async; two rapid clicks both pass a `if (isPreviewLoading)`
+    // gate that closure-captured the pre-update value. `useRef` is the
+    // sync-visible alternative the project's React-stability rules call for.
+    const previewReqIdRef = useRef(0);
     const treeContainerRef = useRef<HTMLDivElement>(null);
     const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -702,16 +712,15 @@ const DirectoryPanel = memo(
     }, [nodeMetaByPath]);
 
     const handlePreview = async (node: DirectoryTreeNode) => {
-      if (node.type !== "file" || isPreviewLoading) {
-        return;
-      }
+      if (node.type !== "file") return;
 
+      const myReq = ++previewReqIdRef.current;
       setIsPreviewLoading(true);
 
       try {
         const payload = await fileService.readPreview({ path: node.path });
+        if (myReq !== previewReqIdRef.current) return; // superseded by newer click
         const fileData = { ...payload, path: node.path };
-        // Route to external handler (split view) if provided, otherwise open modal
         if (onFilePreviewExternal) {
           onFilePreviewExternal(fileData);
         } else {
@@ -719,6 +728,7 @@ const DirectoryPanel = memo(
           setPreviewError(null);
         }
       } catch (err) {
+        if (myReq !== previewReqIdRef.current) return; // superseded; don't toast/commit stale error
         if (onFilePreviewExternal) {
           toast.error("文件预览失败");
         } else {
@@ -728,14 +738,19 @@ const DirectoryPanel = memo(
           );
         }
       } finally {
-        setIsPreviewLoading(false);
+        // Only the latest request controls the loading indicator. Stale
+        // finalizers (a slow earlier request finishing after a newer one) skip
+        // the setter so the UI keeps reflecting the fresh in-flight request.
+        if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
       }
     };
 
     const handleSearchItemClick = async (path: string, initialLineNumber?: number) => {
+      const myReq = ++previewReqIdRef.current;
       setIsPreviewLoading(true);
       try {
         const payload = await fileService.readPreview({ path });
+        if (myReq !== previewReqIdRef.current) return; // superseded
         const fileData = { ...payload, path, initialLineNumber };
         if (onFilePreviewExternal) {
           onFilePreviewExternal(fileData);
@@ -744,6 +759,7 @@ const DirectoryPanel = memo(
           setPreviewError(null);
         }
       } catch (err) {
+        if (myReq !== previewReqIdRef.current) return; // superseded
         if (onFilePreviewExternal) {
           toast.error("文件预览失败");
         } else {
@@ -751,12 +767,13 @@ const DirectoryPanel = memo(
           setPreviewError(err instanceof Error ? err.message : "Failed to preview file.");
         }
       } finally {
-        setIsPreviewLoading(false);
+        if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
       }
     };
 
     const handleImagePreview = async (node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
+      const myReq = ++previewReqIdRef.current;
       try {
         // PRD 0.2.7 Phase D: pre-migration this fetched the sidecar's
         // /agent/download via Rust proxy, then converted the response Blob
@@ -764,9 +781,11 @@ const DirectoryPanel = memo(
         // FileReader trip — `data:<mime>;base64,<body>` is the same thing
         // FileReader.readAsDataURL would have produced.
         const result = await fileService.downloadFile({ path: node.path });
+        if (myReq !== previewReqIdRef.current) return; // superseded
         const dataUrl = `data:${result.mimeType};base64,${result.data}`;
         openPreview(dataUrl, node.name);
       } catch (err) {
+        if (myReq !== previewReqIdRef.current) return; // superseded
         console.error("[DirectoryPanel] Failed to load image:", err);
         toast.error("图片加载失败");
       }
@@ -1937,9 +1956,14 @@ const DirectoryPanel = memo(
                           setSelectedNodes([data]);
                           lastClickedPathRef.current = data.path;
 
-                          if (isPreviewLoading) return;
-
                           if (isImageFile(data.name)) {
+                            // Image branch — same latest-wins pattern as
+                            // handleImagePreview. We don't delegate to it
+                            // because this branch also drives
+                            // `isPreviewLoading` (for the inline modal's
+                            // loading indicator), which `handleImagePreview`
+                            // doesn't touch.
+                            const myReq = ++previewReqIdRef.current;
                             setIsPreviewLoading(true);
                             try {
                               // PRD 0.2.7 Phase D: same migration as
@@ -1948,16 +1972,20 @@ const DirectoryPanel = memo(
                               const result = await fileService.downloadFile({
                                 path: data.path,
                               });
+                              if (myReq !== previewReqIdRef.current) return;
                               const dataUrl = `data:${result.mimeType};base64,${result.data}`;
                               openPreview(dataUrl, data.name);
                             } catch (err) {
+                              if (myReq !== previewReqIdRef.current) return;
                               console.error(
                                 "[DirectoryPanel] Failed to load image:",
                                 err,
                               );
                               toast.error("图片加载失败");
                             } finally {
-                              setIsPreviewLoading(false);
+                              if (myReq === previewReqIdRef.current) {
+                                setIsPreviewLoading(false);
+                              }
                             }
                           } else if (isPreviewable(data.name)) {
                             void handlePreview(data);

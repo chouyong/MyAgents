@@ -14,6 +14,7 @@ export function buildExecApprovalPendingReplyPayload() { _w('buildExecApprovalPe
 export function getExecApprovalApproverDmNoticeText() { _w('getExecApprovalApproverDmNoticeText'); return undefined; }
 export function getExecApprovalReplyMetadata() { _w('getExecApprovalReplyMetadata'); return undefined; }
 export function resolveExecApprovalCommandDisplay() { _w('resolveExecApprovalCommandDisplay'); return undefined; }
+export function formatApprovalDisplayPath() { _w('formatApprovalDisplayPath'); return ""; }
 export function createChannelApproverDmTargetResolver() { _w('createChannelApproverDmTargetResolver'); return undefined; }
 export function createChannelNativeOriginTargetResolver() { _w('createChannelNativeOriginTargetResolver'); return undefined; }
 export function resolveApprovalRequestOriginTarget() { _w('resolveApprovalRequestOriginTarget'); return undefined; }
@@ -29,7 +30,7 @@ export const DEFAULT_PLUGIN_APPROVAL_TIMEOUT_MS = undefined;
 export const MAX_PLUGIN_APPROVAL_TIMEOUT_MS = undefined;
 export function createResolvedApproverActionAuthAdapter() { _w('createResolvedApproverActionAuthAdapter'); return undefined; }
 export function createChannelExecApprovalProfile() { _w('createChannelExecApprovalProfile'); return undefined; }
-export const isChannelExecApprovalClientEnabledFromConfig = undefined;
+export function isChannelExecApprovalClientEnabledFromConfig() { _w('isChannelExecApprovalClientEnabledFromConfig'); return false; }
 export function isChannelExecApprovalTargetRecipient() { _w('isChannelExecApprovalTargetRecipient'); return false; }
 export function createChannelNativeApprovalRuntime() { _w('createChannelNativeApprovalRuntime'); return undefined; }
 export function createApproverRestrictedNativeApprovalAdapter() { _w('createApproverRestrictedNativeApprovalAdapter'); return undefined; }

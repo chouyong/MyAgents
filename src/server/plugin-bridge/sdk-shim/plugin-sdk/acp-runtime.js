@@ -7,7 +7,6 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/acp-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
-export async function tryDispatchAcpReplyHook() { _w('tryDispatchAcpReplyHook'); return undefined; }
 export const __testing = undefined;
 export function getAcpSessionManager() { _w('getAcpSessionManager'); return undefined; }
 export function AcpRuntimeError() { _w('AcpRuntimeError'); return undefined; }
@@ -17,3 +16,4 @@ export function registerAcpRuntimeBackend() { _w('registerAcpRuntimeBackend'); r
 export function requireAcpRuntimeBackend() { _w('requireAcpRuntimeBackend'); return undefined; }
 export function unregisterAcpRuntimeBackend() { _w('unregisterAcpRuntimeBackend'); return undefined; }
 export function readAcpSessionEntry() { _w('readAcpSessionEntry'); return undefined; }
+export function tryDispatchAcpReplyHook() { _w('tryDispatchAcpReplyHook'); return undefined; }

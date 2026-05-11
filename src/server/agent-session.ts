@@ -1187,6 +1187,45 @@ const pendingMidTurnQueue: Array<{
 }> = [];
 
 /**
+ * Is the session currently busy (any signal of work in flight)?
+ *
+ * Used by **auto-injection endpoints** (memory-update, future heartbeat
+ * variants) to refuse injecting `<system-reminder>` content while the user
+ * is actively engaging — those injections trip the SDK's mid-turn
+ * `queued_command` mechanism and the prompt design directs the AI to drop
+ * its current turn and process the injected request, which is exactly the
+ * complaint in issue #190 ("memory update interrupts long-running tasks").
+ *
+ * Returns true when ANY of:
+ *   - `sessionState !== 'idle'` (running / starting / error — turn or
+ *     subprocess transitioning)
+ *   - `isStreamingMessage` (defensive — assistant text/tool stream live)
+ *   - `messageQueue.length > 0` (user direct-send waiting to start a turn)
+ *   - `pendingMidTurnQueue.length > 0` (mid-turn item buffered for replay)
+ *
+ * Pre-warm exception: `isPreWarming=true` is **not** treated as busy.
+ * Pre-warm sessions are cold/idle (sessionState stays 'idle' for the
+ * pre-warm path) and accepting an auto-injection during pre-warm just
+ * means the first message the live session processes is the injection —
+ * that is the ideal time to update memory, not a regression.
+ *
+ * Single source of truth for "is this session safe to auto-inject":
+ * called from `/api/memory/update` (and may be reused by future injection
+ * endpoints) so the gate is evaluated by the process that actually owns
+ * the state, not via stale disk-timestamp proxies (see `lastActiveAt`
+ * gate in `memory_update.rs::run_batch` — it only updates on turn
+ * boundaries, so a single multi-minute turn ages past the 15-min cooldown
+ * even though the session is plainly mid-work; that's how #190 slipped
+ * through every existing gate).
+ */
+export function isSessionBusy(): boolean {
+  return sessionState !== 'idle'
+    || isStreamingMessage
+    || messageQueue.length > 0
+    || pendingMidTurnQueue.length > 0;
+}
+
+/**
  * Rescue pending mid-turn items back to messageQueue front when the SDK subprocess
  * is about to die (abortPersistentSession or interruptCurrentResponse hard-kill).
  *
@@ -6958,22 +6997,48 @@ export async function rewindSession(userMessageId: string): Promise<{
     persistedSessionMessageCache.length = 0;
     await persistMessagesToStorage();
 
-    // 7. 设置下次 query 的对话截断点
+    // 7. 设置下次 query 的对话截断点 — 三分支决策树
     //    UUID 有效性校验（OR 逻辑）：
     //    - liveSessionUuids: SDK subprocess stdout 确认过的 UUID（权威但不完整 — resume 后
     //      SDK 不会重新输出旧历史的 UUID）
     //    - currentSessionUuids: 包含磁盘种子 + 运行时 UUID（覆盖 resume 前的历史）
-    //    - 任一集合包含即为有效。过期 UUID 安全性由 session 重建时清空
-    //      currentSessionUuids（!sessionRegistered → clear）保证。
-    //    - 两者都不包含 → session 被重建过，旧 UUID 无意义，创建新 session
+    //
+    //    分支：
+    //      A. uuidIsLive=true        → 设 anchor，传给 SDK 截断
+    //      B. 锚点 stale 但 session 仍活跃 → 仅清 anchor，**保留 session id** (#189 修复)
+    //      C. 没有锚点 / session 未注册 → 真正的 fresh start，新建 session id
+    //
+    //    **注意**：这两个集合只是 MyAgents 自己的视角，**不是 SDK 持久化状态的权威 proxy**。
+    //    MyAgents 的 JSONL 与 SDK 的 JSONL (~/.claude/projects/.../*.jsonl) 是双份存储、
+    //    异步独立写入（CLAUDE.md「双重存储」节）。SDK subprocess 在 flush 完成前被
+    //    interrupt，会留下 MyAgents 有 / SDK 没有 的 UUID。所以"UUID 不在本地集合"
+    //    **不能**推出"SDK session 已被重建"。
+    //
+    //    issue #189 修复（v0.2.15）：anchor stale 时走分支 B —— 保留 session id，仅清掉
+    //    截断锚点。下次 pre-warm 走 `resume: sessionId` 加载 SDK 全量历史。Trade-off：
+    //    AI 看到的历史可能比 UI 截断后更多（短期分歧），但绝对优于上下文全失忆。
+    //    这一行为与 catch-block 的 "No message found" recovery (~line 9219) 对齐 —
+    //    SDK 真正拒绝 anchor 时也走同样语义。
     const uuidIsLive = lastAssistantUuid
       && (liveSessionUuids.has(lastAssistantUuid) || currentSessionUuids.has(lastAssistantUuid));
     if (uuidIsLive) {
       pendingResumeSessionAt = lastAssistantUuid;
+    } else if (lastAssistantUuid && sessionRegistered) {
+      // Anchor 不在本地集合，但 session 仍然有效（SDK 已注册过此 session）。
+      // 不要重建 session — 仅放弃 resumeSessionAt 截断。
+      console.warn(`[agent] rewind: skipping resumeSessionAt — UUID ${lastAssistantUuid} not in live(${liveSessionUuids.size}) or current(${currentSessionUuids.size}) session (stale/rebuilt). Preserving session id (#189); SDK will resume with full history.`);
+      pendingResumeSessionAt = undefined;
+      // Symmetric eviction with catch-block recovery (line ~9227): drop the stale
+      // UUID so subsequent rewinds don't pass the uuidIsLive OR-check and re-enter
+      // a path that would just be rejected by the SDK again. (No-op if absent.)
+      currentSessionUuids.delete(lastAssistantUuid);
+      // 关键：**不**修改 sessionId / sessionRegistered / hasInitialPrompt。
+      // 下次 startStreamingSession 会用 resume: sessionId 加载 SDK 全量历史。
     } else {
-      if (lastAssistantUuid) {
-        console.warn(`[agent] rewind: skipping resumeSessionAt — UUID ${lastAssistantUuid} not in live(${liveSessionUuids.size}) or current(${currentSessionUuids.size}) session (stale/rebuilt)`);
-      }
+      // 两种合法的"fresh start"场景：
+      //   (a) lastAssistantUuid 为 undefined：rewind 到第一条 user message 之前 / 无 SDK
+      //       tracked assistant —— 没有 SDK 上下文可保留
+      //   (b) sessionRegistered=false：SDK 从未注册过这个 session（首次 pre-warm 失败等）
       pendingResumeSessionAt = undefined;
       sessionRegistered = false;
       sessionId = randomUUID();
@@ -7381,8 +7446,36 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       }
     }
 
+    // Effective `resumeSessionAt` for the SDK call.
+    //
+    // Non-fork: rewindResumeAt is the only source — rewindSession set it to
+    // the previous assistant's sdkUuid (a UUID present in the SDK's own
+    // session JSONL).
+    //
+    // Fork-mode: two candidate anchors coexist —
+    //   forkResumeAt   = where the user originally clicked "fork" (an
+    //                    assistant sdkUuid in the source session's JSONL,
+    //                    written into newSession.forkFrom.messageUuid by
+    //                    forkSession()).
+    //   rewindResumeAt = where the user just rewound to inside the fork
+    //                    (also a source-session sdkUuid, because fork's
+    //                    local messages[] is a copy of source's messages
+    //                    with sdkUuids preserved verbatim — see
+    //                    forkSession()'s message slice).
+    // The SDK call shape is `query({ resume: <source>, forkSession: true,
+    // sessionId: <fork-sid>, resumeSessionAt: <anchor> })`; SDK loads
+    // source's JSONL and slices at the anchor's index. Either candidate
+    // resolves against source, so the rewind anchor is honored without
+    // changing the SDK contract — and when both are set, the rewind one
+    // is the truer expression of what the user wants the fork to contain
+    // (otherwise the rewind would be cosmetic UI truncation while the
+    // SDK still seeds the full fork-point context).
+    const effectiveResumeAt = forkMode
+      ? (rewindResumeAt ?? forkResumeAt)
+      : rewindResumeAt;
+
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}${forkMode ? `, FORK mode (resumeAt: ${forkResumeAt})` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -7870,9 +7963,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Resume：传 resume 恢复对话上下文
     // Fork：resume + forkSession + sessionId + resumeSessionAt（三者组合）
     const sessionOption = forkMode
-      ? { resume: resumeFrom!, forkSession: true, sessionId: effectiveSdkSessionId, ...(forkResumeAt ? { resumeSessionAt: forkResumeAt } : {}) }
+      ? { resume: resumeFrom!, forkSession: true, sessionId: effectiveSdkSessionId, ...(effectiveResumeAt ? { resumeSessionAt: effectiveResumeAt } : {}) }
       : resumeFrom
-        ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
+        ? { resume: resumeFrom, ...(effectiveResumeAt ? { resumeSessionAt: effectiveResumeAt } : {}) }
         : { sessionId: effectiveSdkSessionId };
 
     // (issue #174) Second pre-launch abort guard. Between the first guard

@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./outbound-media.auto.js";
+// === END AUTO-AUGMENT ===
+
 // Hand-written shim for openclaw/plugin-sdk/outbound-media.
 // Source of truth: openclaw/src/plugin-sdk/outbound-media.ts (upstream)
 //

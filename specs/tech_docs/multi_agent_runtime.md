@@ -177,10 +177,42 @@ Server → Client (Notification): {"jsonrpc":"2.0","method":"item/agentMessage/d
 |-------------------|-------------|
 | `item/agentMessage/delta` | `text_delta` |
 | `item/reasoning/summaryTextDelta` | `thinking_delta` |
+| `item/plan/delta` | `thinking_delta`（v0.2.15+ 真显示，之前 `plan` item silent drop） |
 | `item/started` (tool types) | `tool_use_start` |
 | `item/completed` (tool types) | `[tool_use_stop, tool_result]` |
 | `turn/completed` | `turn_complete` |
 | `thread/tokenUsage/updated` | `usage` |
+
+### ThreadItem 类型对照（v0.128 schema）
+
+`codex app-server generate-ts --out <dir>` 可以生成当前装机版本的真实 TS schema
+（不要凭假设，schema 随 Codex 版本飘）。v0.128 schema 见 `/tmp/codex-schema/v2/ThreadItem.ts`，
+本 runtime 对接的字段映射：
+
+| Codex item.type | tool_use_start 工具名 | tool_result 内容 / attachments |
+|---|---|---|
+| `commandExecution` | `Bash` | `aggregatedOutput` + `exitCode` / `durationMs` / `cwd` / `source`；input 带 `commandActions[]`（已 parse 的 read/listFiles/search） |
+| `fileChange` | `Edit` | 路径 + diff；`status` (PatchApplyStatus) declined/failed 显式标 isError |
+| `mcpToolCall` | `mcp__<server>__<tool>` | `result.content[]` 走 MCP ContentBlock union — `text` join 进 content，`image` / `audio` 生成 ToolAttachment；`mcpAppResourceUri` 透出 |
+| `dynamicToolCall` | `<tool>` | `contentItems[]`：`inputText` 进 content，`inputImage{imageUrl}` 生成 ToolAttachment；`namespace` / `durationMs` 透出 |
+| `webSearch` | `WebSearch` | `action` union 全分支（search/openPage/findInPage/other） |
+| `imageView` | `Read` | `path` |
+| `imageGeneration` | `ImageGeneration` | **生图核心**：优先 `savedPath`（零拷贝引用 Codex 自动保存），fallback `result` (base64) 解码落盘 → ToolAttachment[]；content 留 `revisedPrompt` 文字 |
+| `collabAgentToolCall` | `CollabAgent` | tool / prompt / model / senderThreadId / receiverThreadIds 摘要 |
+| `plan` | — (started 走 thinking_start) | text 通过 `item/plan/delta` 流式 |
+| `reasoning` | — (started 走 thinking_start) | summary 通过 `summaryTextDelta` 流式 |
+| `enteredReviewMode` / `exitedReviewMode` | — (log level event) | review-mode 进入/退出提示 |
+| `hookPrompt` | — (log level event) | hook 注入的提示 fragment |
+| `contextCompaction` / `agentMessage` / `userMessage` | — | 通过 turn/agentMessage 路径处理 |
+
+未列出的 item type 会在 `console.warn` 中打印 unhandled，方便 Codex 升级后定位漏接。
+
+### 富媒体产物（ToolAttachment）
+
+Codex 的 `imageGeneration` / `mcpToolCall` 含 image content / `dynamicToolCall` 含 inputImage 三条
+路径都走统一 `saveToolAttachment(...)` → `tool_result.attachments[]`。前端用单一
+`ToolAttachmentGallery` 渲染。完整管道（异步落盘 placeholder、5 层路径校验、SSRF 防护、session
+resume 重 register）详见 [Tool Attachment 管道](./tool_attachment_pipeline.md)。
 
 ### 权限模式映射
 
@@ -433,6 +465,9 @@ config.multiAgentRuntime (磁盘/React state)
 | `src/server/runtimes/gemini.ts` | Gemini Runtime 实现(ACP JSON-RPC 2.0 + `GEMINI_SYSTEM_MD` 合并注入) |
 | `src/server/runtimes/external-session.ts` | 外部 Runtime 统一会话管理 |
 | `src/server/runtimes/env-utils.ts` | 环境变量增强（PATH 补全） |
+| `src/server/runtimes/tool-attachments.ts` | `saveToolAttachment` 落盘 helper + in-flight tracker + external-path registry（PRD 0.2.15） |
+| `src/server/utils/path-safety.ts` | Node 镜像 Rust `validate_file_path` 黑名单 + canonicalize symlinks（PRD 0.2.15） |
+| `src/shared/types/tool-attachment.ts` | `ToolAttachment` 共享类型（PRD 0.2.15） |
 | `src/shared/types/runtime.ts` | 共享类型（RuntimeType、模型列表、权限模式） |
 | `src/renderer/components/RuntimeSelector.tsx` | 前端 Runtime 选择器组件 |
 | `src/server/runtimes/claude-code.ts` → `FORWARDER_SCRIPT` | CC SessionStart hook 转发脚本（运行时生成至 `~/.myagents/.cc-hooks/forwarder.cjs`） |

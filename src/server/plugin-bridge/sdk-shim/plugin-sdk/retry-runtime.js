@@ -7,7 +7,7 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/retry-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
-export const resolveRetryConfig = undefined;
+export function resolveRetryConfig() { _w('resolveRetryConfig'); return undefined; }
 export function retryAsync() { _w('retryAsync'); return undefined; }
 export function createRateLimitRetryRunner() { _w('createRateLimitRetryRunner'); return undefined; }
 export function createTelegramRetryRunner() { _w('createTelegramRetryRunner'); return undefined; }

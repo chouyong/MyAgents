@@ -3,11 +3,11 @@
 // Communication: NDJSON bidirectional via stdin/stdout
 // Flags: --output-format stream-json --input-format stream-json --verbose
 // Permission: --permission-prompt-tool stdio (delegates to MyAgents UI)
-// System prompt: --append-system-prompt (or --bare + --append-system-prompt for IM)
+// System prompt: --append-system-prompt-file (file-based; inline would be silently truncated by cmd.exe on Windows)
 // Session: --session-id / --resume
 
 import { spawn, type Subprocess } from '../utils/subprocess';
-import { writeFileSync , existsSync, unlinkSync } from 'fs';
+import { writeFileSync , existsSync, unlinkSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
@@ -48,6 +48,80 @@ const HOOK_DIR = join(
   process.env.HOME || process.env.USERPROFILE || '/tmp',
   '.myagents', 'tmp', 'cc-hooks',
 );
+
+// System prompt tmp dir — separate from cc-hooks so the two concerns can be
+// cleaned independently.
+const SYSTEM_PROMPT_DIR = join(
+  process.env.HOME || process.env.USERPROFILE || '/tmp',
+  '.myagents', 'tmp', 'cc-system-prompt',
+);
+
+/**
+ * Per-session prompt file path. The sessionId is sanitized to a strict
+ * `[A-Za-z0-9._-]` charset to prevent directory traversal — upstream callers
+ * give us UUID v4s in practice, but `external-session.ts:885` only upgrades
+ * `pending-*` placeholders; it does NOT validate UUID shape. A malformed
+ * sessionId reaching this helper without sanitization could escape
+ * `SYSTEM_PROMPT_DIR` via `../`. Matches the defence in
+ * `gemini.ts:sessionSystemPromptPath`.
+ */
+function systemPromptPath(sessionId: string): string {
+  const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, '_') || 'unknown';
+  return join(SYSTEM_PROMPT_DIR, `${safe}.md`);
+}
+
+/**
+ * Write the MyAgents system prompt to a tmp file and return its absolute path.
+ *
+ * Why file instead of `--append-system-prompt <inline>`: on Windows the CC
+ * binary is invoked through a `.cmd` shim, which Node spawns via
+ * `cmd.exe /d /s /c "<cmdline>"`. cmd.exe treats `\n` as a command boundary
+ * inside the wrapped command string, silently truncating every arg that follows
+ * the first newline. MyAgents' system prompt is multi-line (4–5KB, ~80 LFs), so
+ * `--resume` / `--session-id` / `--model` / `--settings` all get dropped → CC
+ * spawns a brand-new session every turn → multi-turn context completely lost.
+ * `--append-system-prompt-file <path>` sidesteps the entire issue: the path
+ * itself has no newlines, and the prompt body never crosses the cmd.exe parser.
+ *
+ * Supported on CC CLI ≥ v2.1.x (confirmed v2.1.119 + v2.1.138 both ship it).
+ *
+ * File hygiene:
+ *  - `mode: 0o600` so the prompt (may carry workspace guidance / user-tunable
+ *    context) is only readable by the running user.
+ *  - One file per sessionId, overwritten on each spawn so prompt edits land
+ *    immediately. Stale files from previous sessions are reaped by
+ *    `cleanupStaleSystemPrompts()` on the next `startSession`.
+ */
+function writeSystemPromptFile(sessionId: string, content: string): string {
+  ensureDirSync(SYSTEM_PROMPT_DIR);
+  const promptPath = systemPromptPath(sessionId);
+  writeFileSync(promptPath, content, { encoding: 'utf8', mode: 0o600 });
+  return promptPath;
+}
+
+/**
+ * Best-effort age-based GC for `SYSTEM_PROMPT_DIR`. Removes prompt files older
+ * than 1 hour. Called from `startSession` (same trigger pattern as
+ * `gemini.ts:cleanupStaleSessionPrompts`).
+ *
+ * Not unlinked on `stopSession` because the prompt filename is sessionId-keyed
+ * (deterministic across spawns of the same session); a late delete from a
+ * failed prior attempt would clobber the file the next spawn just wrote.
+ * Age-based cleanup avoids the race.
+ */
+function cleanupStaleSystemPrompts(): void {
+  try {
+    if (!existsSync(SYSTEM_PROMPT_DIR)) return;
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const file of readdirSync(SYSTEM_PROMPT_DIR)) {
+      if (!file.endsWith('.md')) continue;
+      const path = join(SYSTEM_PROMPT_DIR, file);
+      try {
+        if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+      } catch { /* ignore individual file errors */ }
+    }
+  } catch { /* ignore */ }
+}
 
 // Forwarder script content — inlined to avoid production bundle issues
 // (bun build doesn't copy companion .cjs files into the output)
@@ -224,6 +298,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     this.blockIndexToToolUseId.clear();
     this.blockIndexToType.clear();
 
+    // Age-based GC for tmp system-prompt files — see cleanupStaleSystemPrompts().
+    cleanupStaleSystemPrompts();
+
     const args: string[] = [
       '-p',
       '--output-format', 'stream-json',
@@ -248,7 +325,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     //    "result":"Not logged in · Please run /login",...}
     //
     // We drop --bare entirely. CC loads its default preset prompt + our
-    // --append-system-prompt adds the MyAgents 3-layer context on top.
+    // --append-system-prompt-file adds the MyAgents 3-layer context on top.
     // Keychain/OAuth auth is preserved for all IM users. The tradeoff:
     // the AI has CC's default preset loaded in an IM context, which may
     // leak occasional self-descriptions ("I'm Claude Code, a CLI tool…").
@@ -257,7 +334,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Note: `isImOrChannel` is still consulted below for the auto-bypass
     // permission branch, which is a separate concern.
     if (options.systemPromptAppend) {
-      args.push('--append-system-prompt', options.systemPromptAppend);
+      // File-based, not inline — see writeSystemPromptFile() rationale above.
+      const promptPath = writeSystemPromptFile(options.sessionId, options.systemPromptAppend);
+      args.push('--append-system-prompt-file', promptPath);
     }
 
     // Permission mode

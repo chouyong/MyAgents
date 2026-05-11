@@ -7,6 +7,7 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/media-generation-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function recordCapabilityCandidateFailure() { _w('recordCapabilityCandidateFailure'); return undefined; }
 export function hasMediaNormalizationEntry() { _w('hasMediaNormalizationEntry'); return false; }
 export function resolveCapabilityModelCandidates() { _w('resolveCapabilityModelCandidates'); return undefined; }
 export function deriveAspectRatioFromSize() { _w('deriveAspectRatioFromSize'); return undefined; }

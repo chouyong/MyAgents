@@ -34,6 +34,7 @@ const JSON_EVENTS = new Set([
     'chat:tool-result-start',
     'chat:tool-result-delta',
     'chat:tool-result-complete',
+    'chat:tool-attachment-update', // PRD 0.2.15 — placeholder attachment async fulfillment
     'chat:subagent-tool-use',
     'chat:subagent-tool-input-delta',
     'chat:subagent-tool-result-start',

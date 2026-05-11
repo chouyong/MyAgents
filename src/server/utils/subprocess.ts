@@ -113,8 +113,44 @@ const CMD_SHIM_REGEX = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i;
  *   4. ^-escape cmd.exe metacharacters (so they survive cmd.exe's first pass)
  *   5. (For local node_modules/.bin shims only) ^-escape a second time
  */
-function escapeWindowsCmdArg(arg: string, doubleEscapeMetaChars: boolean): string {
+function escapeWindowsCmdArg(arg: string, doubleEscapeMetaChars: boolean, argIndex?: number): string {
   let s = String(arg);
+  // cmd.exe-wrapped commands inherit the host's command-line parser, which
+  // treats `\r` / `\n` as command boundaries even inside the `/c "<cmdline>"`
+  // quoting context. The arg is not technically escapable — the only honest
+  // fix is to route multi-line content through stdin / env / a temp file (see
+  // claude-code.ts:writeSystemPromptFile for a worked example). We still
+  // forward the arg here so callers' behaviour doesn't change on this hot
+  // path, but a loud warning is emitted so the next person to hit this
+  // doesn't burn a week reverse-engineering "why are random args getting
+  // dropped on Windows only". Linux/macOS callers never reach this function,
+  // so they don't get spurious warns.
+  //
+  // The warning intentionally does NOT include arg content (it might be a
+  // system prompt, PEM block, env blob, or pasted user text — none of which
+  // belong in a unified log streamed to the renderer over SSE). argIndex +
+  // length + line count + a hash give enough fingerprint to identify the
+  // call site without leaking secrets. The whole block is `try`-guarded
+  // because a failing logger path must never alter spawn behaviour.
+  if (/[\r\n]/.test(s)) {
+    try {
+      const lineCount = (s.match(/\r\n|\r|\n/g) || []).length + 1;
+      // FNV-1a 32-bit — non-cryptographic, just enough to correlate repeat
+      // offenders across log lines without printing the content.
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+      }
+      console.warn(
+        `[subprocess] cmd.exe-wrapped argument contains \\r or \\n ` +
+        `(argIndex=${argIndex ?? '?'}, length=${s.length}, lines=${lineCount}, fp=${h.toString(16).padStart(8, '0')}). ` +
+        `cmd.exe will silently truncate the command at the first newline, dropping all ` +
+        `subsequent arguments. Pass multi-line content via stdin, env var, or a temp file ` +
+        `(e.g. --foo-file <path>) instead.`
+      );
+    } catch { /* diagnostic-only; never let logging failure change spawn behaviour */ }
+  }
   // Greedy `(\\*)` so 2+ consecutive backslashes preceding `"` (or end-of-arg)
   // are all doubled. Earlier draft used lazy `(\\+?)?` which captured at most
   // one backslash and silently emitted `…\\\\"` (4 BS + bare quote) for input
@@ -162,7 +198,7 @@ export function spawn(argv: string[], options: SpawnOptions = {}): SubprocessHan
   if (needsWindowsShell(cmd)) {
     const doubleEscape = CMD_SHIM_REGEX.test(cmd);
     const escapedCmd = escapeWindowsCmdCommand(cmd);
-    const escapedArgs = args.map((a) => escapeWindowsCmdArg(a, doubleEscape));
+    const escapedArgs = args.map((a, i) => escapeWindowsCmdArg(a, doubleEscape, i));
     const cmdLine = [escapedCmd, ...escapedArgs].join(' ');
     nodeOpts.windowsVerbatimArguments = true;
     // Default windowsHide:true on the cmd.exe wrap path — wrapping IS the

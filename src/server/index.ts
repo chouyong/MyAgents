@@ -2,6 +2,8 @@ import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, 
 import { copyFile as copyFileAsync, readdir as readdirAsync, rm, stat } from 'fs/promises';
 import { spawn as subprocessSpawn } from './utils/subprocess';
 import { fileResponse, sniffMime } from './utils/file-response';
+import { lookupExternalAttachment } from './runtimes/tool-attachments';
+import { getToolAttachmentRoot, validateExternalReadPathNode } from './utils/path-safety';
 import { serve as honoServe } from '@hono/node-server';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -535,7 +537,7 @@ import {
 import { appendUnifiedLogBatch, getRecentLogLines, getActiveUnifiedLogPath } from './UnifiedLogger';
 import { getActiveSessionLogPath } from './AgentLogger';
 import { runLogRetentionSweep, startPeriodicSweep } from './log-retention';
-import { createSseClient, getClients } from './sse';
+import { broadcast, createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import type { CancelReason } from './utils/cancellation';
@@ -555,6 +557,7 @@ import { registerBridgeSeedFn } from './bridge-cache';
 import {
   shouldUseExternalRuntime,
   sendExternalMessage,
+  enqueueExternalSendForDesktop,
   respondExternalPermission,
   respondExternalAskUserQuestion,
   hasPendingExternalAskUserQuestion,
@@ -1818,6 +1821,82 @@ async function main() {
         return new Response(JSON.stringify(gate.body), { status: gate.status, headers });
       }
 
+      // Tool attachment endpoint (PRD 0.2.15) — rich-media tool outputs (image/audio/pdf/file).
+      // URL shape: GET /api/attachment/tool/<sessionId>/<turnId>/<filename>
+      //
+      // Resolution:
+      //   1. Look up the external-path registry (Codex savedPath, dynamic URLs after fetch).
+      //      Hit → serve that real path.
+      //   2. Miss → fall back to the trusted attachment root <home>/.myagents/generated/
+      //      tool-attachments/<s>/<t>/<f> (where base64 / URL downloads land).
+      //
+      // Security: the registry only holds paths registered by saveToolAttachment, which
+      // pre-validated them via validateExternalReadPathNode (system/credential blacklist).
+      // The trusted-root fallback is by construction inside the MyAgents-owned tree.
+      if (pathname.startsWith('/api/attachment/tool/') && request.method === 'GET') {
+        // Codex review EP1: decodeURIComponent throws URIError on malformed
+        // %xx escapes — wrap explicitly so we return 400 (with CORS) instead
+        // of crashing the request and leaving the renderer with an opaque error.
+        let rest: string;
+        try {
+          rest = decodeURIComponent(pathname.slice('/api/attachment/tool/'.length));
+        } catch {
+          return new Response('Bad Request', {
+            status: 400,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        const segs = rest.split('/').filter(Boolean);
+        if (segs.length !== 3) {
+          return new Response('Bad Request', {
+            status: 400,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        const [sid, tid, fname] = segs;
+        // Guard against `..` / `/` / `\` / control chars in any segment.
+        const hasUnsafeChar = (s: string): boolean => {
+          if (s.includes('..')) return true;
+          for (let i = 0; i < s.length; i++) {
+            const code = s.charCodeAt(i);
+            if (code < 0x20) return true;
+            if (s[i] === '/' || s[i] === '\\') return true;
+          }
+          return false;
+        };
+        if (segs.some(hasUnsafeChar)) {
+          return new Response('Forbidden', {
+            status: 403,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        let realPath = lookupExternalAttachment(sid, tid, fname);
+        if (!realPath) {
+          // Fall back to the trusted root for base64/URL-downloaded attachments.
+          realPath = join(getToolAttachmentRoot(), sid, tid, fname);
+        }
+        // Defense-in-depth: blacklist check (paths in registry have already passed,
+        // but if a session-resume rebuild ever fed in a bad path we'd refuse here).
+        const check = validateExternalReadPathNode(realPath);
+        if (!check.ok) {
+          return new Response('Forbidden', {
+            status: 403,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        const fileResp = await fileResponse(check.canonical, {
+          contentType: sniffMime(check.canonical),
+          headers: {
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+        return fileResp ?? new Response('Not Found', {
+          status: 404,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+
       // Browser dev-mode fallback for attachment files.
       // Production uses the Tauri `myagents://attachment/<path>` custom protocol
       // (`src-tauri/src/attachment_protocol.rs`) which serves bytes directly
@@ -1953,25 +2032,50 @@ async function main() {
 
         // ─── External Runtime branch (v0.1.59) ───
         if (shouldUseExternalRuntime()) {
-          try {
-            const runtimeType = getActiveRuntimeType();
-            console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
+          const runtimeType = getActiveRuntimeType();
+          console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
 
-            // Unified send: sendExternalMessage handles both first message and follow-ups.
-            // CC's -p mode exits after each turn; sendExternalMessage detects this
-            // and spawns a new process with --resume for multi-turn continuity.
-            const result = await sendExternalMessage(
-              text, images, permissionMode, model ?? undefined,
-              // Pass session context for first-time start
-              { sessionId: getSessionId(), workspacePath: agentDir, scenario: { type: 'desktop' as const }, permissionMode, model: model ?? undefined },
-            );
-            return jsonResponse({ success: result.queued, error: result.error });
-          } catch (error) {
-            return jsonResponse(
-              { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-              500
-            );
-          }
+          // Issue #188 — Fire-and-forget dispatch via enqueueExternalSendForDesktop.
+          //
+          // sendExternalMessage internally serializes against in-flight turns
+          // by awaiting waitForExternalSessionIdle(5 * 60 * 1000). That wait
+          // exceeds the Rust SSE proxy's HTTP_PROXY_TIMEOUT_SECS=120s cap, so
+          // if a long Codex/Gemini turn is mid-flight the HTTP request dies
+          // at 120s and the renderer surfaces it as "AI 调用失败：网络错误"
+          // even though the sidecar is healthy.
+          //
+          // enqueueExternalSendForDesktop synchronously broadcasts the user
+          // bubble so the renderer shows it immediately, then chains the
+          // wait+dispatch onto a module-level tail so concurrent desktop
+          // sends serialize cleanly (otherwise they'd all wake from the same
+          // turnCompleted gate and race to write to the persistent runtime).
+          // Errors that previously came back over HTTP now broadcast via
+          // chat:agent-error — the renderer already routes that event to the
+          // same agentError state the HTTP .then(response.error) branch used.
+          //
+          // Note: cron/IM internal callers still `await` sendExternalMessage
+          // directly (they're inside the sidecar event loop, no 120s ceiling,
+          // and already single-flighted at the caller level).
+          const sendCtx = {
+            sessionId: getSessionId(),
+            workspacePath: agentDir,
+            scenario: { type: 'desktop' as const },
+            permissionMode,
+            model: model ?? undefined,
+          };
+          void enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx)
+            .then((result) => {
+              if (!result.queued && result.error) {
+                console.error(`[chat] external send failed: ${result.error}`);
+                broadcast('chat:agent-error', { message: result.error });
+              }
+            })
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(`[chat] external send threw: ${msg}`);
+              broadcast('chat:agent-error', { message: msg });
+            });
+          return jsonResponse({ success: true, queued: true });
         }
 
         // ─── Builtin Runtime (existing path) ───
@@ -8431,6 +8535,19 @@ description: >
       if (pathname === '/api/memory/update' && request.method === 'POST') {
         try {
           const payload = await request.json() as { source: 'auto' | 'manual' };
+          const isAuto = payload.source === 'auto';
+
+          // (issue #190 v0.2.15) Busy gate — refuse auto-injection when the
+          // session is actively working. The Rust-side `lastActiveAt` cooldown
+          // is only a disk-timestamp proxy and ages past its 15-min threshold
+          // during a single long turn, so this check is the authoritative one.
+          // Manual updates (user clicked the button) bypass — explicit user
+          // intent is allowed to queue behind the active turn as expected.
+          const { isSessionBusy, enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
+          if (isAuto && isSessionBusy()) {
+            console.log('[memory-update] Skipped: session busy (auto)');
+            return jsonResponse({ status: 'skipped', reason: 'session_busy' });
+          }
 
           // Read UPDATE_MEMORY.md from workspace root
           const updateMdPath = join(currentAgentDir, 'UPDATE_MEMORY.md');
@@ -8455,8 +8572,6 @@ description: >
           });
 
           const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
-
-          const { enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
 
           // Inject as user message — memory update is unattended, bypass all permissions
           // so Bash/file tools (git commit, file writes) don't block waiting for approval.

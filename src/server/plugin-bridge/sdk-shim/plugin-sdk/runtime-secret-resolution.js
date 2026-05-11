@@ -9,3 +9,6 @@ function _w(fn) {
 
 export function resolveCommandSecretRefsViaGateway() { _w('resolveCommandSecretRefsViaGateway'); return undefined; }
 export function getChannelsCommandSecretTargetIds() { _w('getChannelsCommandSecretTargetIds'); return undefined; }
+export function resolveSecretRefValues() { _w('resolveSecretRefValues'); return undefined; }
+export function applyResolvedAssignments() { _w('applyResolvedAssignments'); return undefined; }
+export function createResolverContext() { _w('createResolverContext'); return undefined; }

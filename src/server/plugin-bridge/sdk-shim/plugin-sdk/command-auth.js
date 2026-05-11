@@ -1,3 +1,9 @@
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./command-auth.auto.js";
+// === END AUTO-AUGMENT ===
+
 // OpenClaw plugin-sdk/command-auth shim for MyAgents Plugin Bridge
 // Provides command authorization resolution for channel plugins.
 // MyAgents handles access control at the Rust layer, so these are permissive defaults.

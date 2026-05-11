@@ -15,6 +15,7 @@ export async function sendTextMediaPayload() { _w('sendTextMediaPayload'); retur
 export async function sendMediaWithLeadingCaption() { _w('sendMediaWithLeadingCaption'); return undefined; }
 export async function deliverTextOrMediaReply() { _w('deliverTextOrMediaReply'); return undefined; }
 export async function deliverFormattedTextWithAttachments() { _w('deliverFormattedTextWithAttachments'); return undefined; }
+export function isReasoningReplyPayload() { _w('isReasoningReplyPayload'); return false; }
 export function normalizeOutboundReplyPayload() { _w('normalizeOutboundReplyPayload'); return ""; }
 export function createNormalizedOutboundDeliverer() { _w('createNormalizedOutboundDeliverer'); return undefined; }
 export function resolveOutboundMediaUrls() { _w('resolveOutboundMediaUrls'); return undefined; }

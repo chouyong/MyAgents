@@ -455,6 +455,7 @@ export function ThoughtPanel({
           onCreated={(t) => setThoughts((prev) => [t, ...prev])}
           existingTags={tagCandidates}
           autoFocus={autoFocusInput}
+          minLines={3}
         />
       </div>
 

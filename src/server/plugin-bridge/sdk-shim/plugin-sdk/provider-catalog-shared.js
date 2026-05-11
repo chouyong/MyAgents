@@ -7,6 +7,7 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/provider-catalog-shared.' + fn + '() not implemented in Bridge mode'); }
 }
 
+export function buildManifestModelProviderConfig() { _w('buildManifestModelProviderConfig'); return undefined; }
 export function readConfiguredProviderCatalogEntries() { _w('readConfiguredProviderCatalogEntries'); return undefined; }
 export function supportsNativeStreamingUsageCompat() { _w('supportsNativeStreamingUsageCompat'); return false; }
 export function applyProviderNativeStreamingUsageCompat() { _w('applyProviderNativeStreamingUsageCompat'); return undefined; }

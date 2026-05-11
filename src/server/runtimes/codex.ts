@@ -17,6 +17,15 @@ import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
 import { withLogContext } from '../logger-context';
+import {
+  saveToolAttachment,
+  makePlaceholderAttachment,
+  makeErrorAttachment,
+  trackInFlightSave,
+  type AttachmentSource,
+  type SaveContext,
+} from './tool-attachments';
+import type { ToolAttachment } from '../../shared/types/tool-attachment';
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -258,6 +267,11 @@ class CodexProcess implements RuntimeProcess {
   threadId = '';
   currentTurnId = '';
   agentMessageTextById = new Map<string, string>();
+
+  /** MyAgents sessionId (from SessionStartOptions). Used as the attachment scope key
+   *  so refPath /api/attachment/tool/<sessionId>/<turnId>/<file> stays consistent
+   *  across runtime resumes within the same MyAgents session. */
+  sessionId = '';
   // True when the startSession catch-handler killed the process itself (stale
   // resume, init failure, etc.). Suppresses the synthetic "Codex process
   // exited with code 143" session_complete emitted by proc.exited.then — the
@@ -444,6 +458,7 @@ export class CodexRuntime implements AgentRuntime {
     });
 
     const codexProc = new CodexProcess(proc);
+    codexProc.sessionId = options.sessionId;
 
     // Dedup guard: prevent double session_complete from notification + process exit
     let sessionCompleteEmitted = false;
@@ -500,7 +515,7 @@ export class CodexRuntime implements AgentRuntime {
         }
         console.log(`[codex] ${method}${detail}`);
       }
-      const result = this.parseNotification(codexProc, method, params);
+      const result = this.parseNotification(codexProc, method, params, wrappedOnEvent);
       if (!result) return;
       // parseNotification may return one event or an array (e.g., tool_use_stop + tool_result)
       const events = Array.isArray(result) ? result : [result];
@@ -712,7 +727,52 @@ export class CodexRuntime implements AgentRuntime {
 
   // ─── Notification parsing (v2 typed notifications) ───
 
-  private parseNotification(codexProc: CodexProcess, method: string, params: unknown): UnifiedEvent | UnifiedEvent[] | null {
+  /**
+   * Schedule an async tool attachment save and broadcast a `tool_attachment_update`
+   * UnifiedEvent when it resolves. Returns a placeholder attachment to embed in
+   * the synchronous `tool_result` emit. PRD 0.2.15 §4.7.1.
+   */
+  private scheduleAttachmentSave(
+    source: AttachmentSource,
+    ctx: SaveContext,
+    asyncEmit: UnifiedEventCallback,
+  ): ToolAttachment {
+    const { attachment, pendingId } = makePlaceholderAttachment(ctx);
+    // Wrap in a tracked promise so `persistTurnResult` can await all in-flight
+    // saves before snapshotting currentContentBlocks. queueMicrotask ensures
+    // the synchronous tool_result emit lands first, then this fulfills the
+    // placeholder. Codex review SM1.
+    const tracked = (async (): Promise<void> => {
+      try {
+        const real = await saveToolAttachment(source, ctx);
+        asyncEmit({
+          kind: 'tool_attachment_update',
+          toolUseId: ctx.toolUseId,
+          pendingId,
+          attachment: real,
+        });
+      } catch (err) {
+        // Verbose detail to server log; safe enum code travels over SSE.
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`[codex] saveToolAttachment failed (toolUseId=${ctx.toolUseId}): ${reason}`);
+        asyncEmit({
+          kind: 'tool_attachment_update',
+          toolUseId: ctx.toolUseId,
+          pendingId,
+          attachment: makeErrorAttachment(ctx, err, pendingId),
+        });
+      }
+    })();
+    trackInFlightSave(tracked);
+    return attachment;
+  }
+
+  private parseNotification(
+    codexProc: CodexProcess,
+    method: string,
+    params: unknown,
+    asyncEmit: UnifiedEventCallback,
+  ): UnifiedEvent | UnifiedEvent[] | null {
     const p = params as Record<string, unknown>;
 
     switch (method) {
@@ -792,9 +852,11 @@ export class CodexRuntime implements AgentRuntime {
           type: string; id: string;
           command?: string; cwd?: string; tool?: string; server?: string;
           text?: string; query?: string; arguments?: unknown;
-          path?: string; revisedPrompt?: string;
+          path?: string; revisedPrompt?: string; mcpAppResourceUri?: string;
           changes?: Array<{ path: string }>;
           commandActions?: unknown[];
+          source?: string; namespace?: string | null;
+          senderThreadId?: string; receiverThreadIds?: string[]; prompt?: string; model?: string;
         } | undefined;
         if (!item) return null;
         switch (item.type) {
@@ -806,6 +868,7 @@ export class CodexRuntime implements AgentRuntime {
               input: {
                 command: item.command ?? '',
                 ...(item.cwd ? { cwd: item.cwd } : {}),
+                ...(item.source ? { source: item.source } : {}),
                 ...(Array.isArray(item.commandActions) ? { commandActions: item.commandActions } : {}),
               },
             };
@@ -826,25 +889,48 @@ export class CodexRuntime implements AgentRuntime {
           case 'mcpToolCall': {
             // Prefix with mcp__ to match frontend MCP tool badge patterns
             const toolName = item.server && item.tool ? `mcp__${item.server}__${item.tool}` : (item.tool || 'MCP Tool');
+            const baseInput: Record<string, unknown> = (item.arguments && typeof item.arguments === 'object')
+              ? { ...(item.arguments as Record<string, unknown>) }
+              : {};
+            if (item.mcpAppResourceUri) baseInput.mcpAppResourceUri = item.mcpAppResourceUri;
             return {
               kind: 'tool_use_start',
               toolUseId: item.id,
               toolName,
-              input: (item.arguments && typeof item.arguments === 'object')
-                ? item.arguments as Record<string, unknown>
-                : undefined,
+              input: Object.keys(baseInput).length > 0 ? baseInput : undefined,
             };
           }
           case 'dynamicToolCall': {
+            const baseInput: Record<string, unknown> = (item.arguments && typeof item.arguments === 'object')
+              ? { ...(item.arguments as Record<string, unknown>) }
+              : {};
+            if (item.namespace) baseInput.namespace = item.namespace;
             return {
               kind: 'tool_use_start',
               toolUseId: item.id,
               toolName: item.tool || 'Tool',
-              input: (item.arguments && typeof item.arguments === 'object')
-                ? item.arguments as Record<string, unknown>
-                : undefined,
+              input: Object.keys(baseInput).length > 0 ? baseInput : undefined,
             };
           }
+          case 'collabAgentToolCall': {
+            // PRD 0.2.15 — surface collab agent invocation as a tool card.
+            const input: Record<string, unknown> = {};
+            if (item.tool) input.tool = item.tool;
+            if (item.prompt) input.prompt = item.prompt;
+            if (item.model) input.model = item.model;
+            if (item.senderThreadId) input.senderThreadId = item.senderThreadId;
+            if (Array.isArray(item.receiverThreadIds)) input.receiverThreadIds = item.receiverThreadIds;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName: 'CollabAgent',
+              input: Object.keys(input).length > 0 ? input : undefined,
+            };
+          }
+          case 'plan':
+            // PRD 0.2.15 — `plan` items stream via item/plan/delta as thinking_delta.
+            // We need a thinking_start so the frontend opens a thinking block.
+            return { kind: 'thinking_start', index: 0 };
           case 'webSearch': {
             return {
               kind: 'tool_use_start',
@@ -867,10 +953,17 @@ export class CodexRuntime implements AgentRuntime {
             return { kind: 'thinking_start', index: 0 };
           case 'agentMessage':
           case 'userMessage':
-          case 'plan':
           case 'contextCompaction':
             return null;
+          case 'enteredReviewMode':
+          case 'exitedReviewMode':
+          case 'hookPrompt':
+            // Handled in item/completed (transition events, no started-side render).
+            return null;
           default:
+            // Codex review W4 — silent drop hides newly-added item types from
+            // future Codex versions. Log so production triage has a breadcrumb.
+            console.warn(`[codex] item/started: unhandled item.type=${(item as { type?: string }).type}`);
             return null;
         }
       }
@@ -880,14 +973,30 @@ export class CodexRuntime implements AgentRuntime {
           type: string; id: string;
           command?: string; aggregatedOutput?: string; exitCode?: number; durationMs?: number; cwd?: string; processId?: string; status?: string;
           changes?: Array<{ path: string; kind: string; diff: string }>;
-          tool?: string; result?: unknown; error?: { message: string };
+          tool?: string; server?: string; mcpAppResourceUri?: string;
+          arguments?: unknown; namespace?: string | null;
+          result?: unknown; error?: { message: string };
           text?: string; summary?: string[];
-          query?: string; action?: { type: string; url?: string; queries?: string[] };
-          path?: string; revisedPrompt?: string;
-          contentItems?: Array<{ type: string; text?: string }>;
-          success?: boolean;
+          query?: string; action?: { type: string; url?: string; queries?: string[]; pattern?: string };
+          path?: string; revisedPrompt?: string; savedPath?: string;
+          contentItems?: Array<{ type: string; text?: string; imageUrl?: string }>;
+          success?: boolean; review?: string;
+          senderThreadId?: string; receiverThreadIds?: string[];
+          prompt?: string; model?: string;
         } | undefined;
         if (!item) return null;
+
+        // Attachment save context — shared by image-producing case branches below.
+        // turnId comes from Codex; if Codex never emitted one yet (shouldn't happen
+        // at item/completed time) we fall back to the item id to preserve uniqueness.
+        const attachCtx = (mimeType: string, caption?: string, producedBy?: string): SaveContext => ({
+          sessionId: codexProc.sessionId || 'unknown-session',
+          turnId: codexProc.currentTurnId || item.id,
+          toolUseId: item.id,
+          mimeType,
+          caption,
+          producedBy,
+        });
 
         // For tool items, emit tool_use_stop + tool_result as a pair
         // (frontend expects stop before result, matching CC's content_block_stop → tool_result)
@@ -910,35 +1019,119 @@ export class CodexRuntime implements AgentRuntime {
               },
             ];
           case 'fileChange': {
-            // Show file paths and diffs for each changed file
+            // Show file paths and diffs for each changed file, plus terminal status
+            // (inProgress / completed / failed / declined) — `declined` matters
+            // because user-rejected patches look identical to other states without it.
             const details = Array.isArray(item.changes)
               ? item.changes.map(c => `${c.kind}: ${c.path}${c.diff ? '\n' + c.diff : ''}`).join('\n\n')
               : 'File changed';
+            const isFailedPatch = item.status === 'failed' || item.status === 'declined';
+            const statusPrefix = item.status && item.status !== 'completed'
+              ? `[${item.status}]\n`
+              : '';
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: details },
+              {
+                kind: 'tool_result',
+                toolUseId: item.id,
+                content: statusPrefix + details,
+                isError: isFailedPatch,
+                metadata: { status: item.status },
+              },
             ];
           }
           case 'mcpToolCall': {
-            // Extract text content from MCP result
-            const resultContent = (item.result as { content?: Array<{ text?: string }> })?.content;
-            const text = resultContent?.map(c => c.text || '').filter(Boolean).join('\n') || JSON.stringify(item.result ?? '');
+            // Walk MCP ContentBlock[] per spec: text/image/audio/resource/resource_link.
+            // Text joins into the human-readable content string; image/audio land as
+            // ToolAttachment[] for unified rendering.
+            const contentArr = ((item.result as { content?: Array<Record<string, unknown>> })?.content) || [];
+            const texts: string[] = [];
+            const attachments: ToolAttachment[] = [];
+            for (const block of contentArr) {
+              const ty = block.type as string | undefined;
+              if (ty === 'text' && typeof block.text === 'string') {
+                texts.push(block.text);
+              } else if (ty === 'image' && typeof block.data === 'string') {
+                const mime = (typeof block.mimeType === 'string' ? block.mimeType : 'image/png');
+                const ctx = attachCtx(mime, undefined, `codex.mcp.${item.server ?? ''}.${item.tool ?? ''}`);
+                attachments.push(this.scheduleAttachmentSave(
+                  { kind: 'base64', data: block.data as string },
+                  ctx,
+                  asyncEmit,
+                ));
+              } else if (ty === 'audio' && typeof block.data === 'string') {
+                const mime = (typeof block.mimeType === 'string' ? block.mimeType : 'audio/mpeg');
+                const ctx = attachCtx(mime, undefined, `codex.mcp.${item.server ?? ''}.${item.tool ?? ''}`);
+                attachments.push(this.scheduleAttachmentSave(
+                  { kind: 'base64', data: block.data as string },
+                  ctx,
+                  asyncEmit,
+                ));
+              } else if (ty === 'resource_link' && typeof block.uri === 'string') {
+                texts.push(`[resource] ${block.uri}`);
+              }
+            }
+            const fallbackText = texts.length === 0 && attachments.length === 0
+              ? JSON.stringify(item.result ?? '')
+              : '';
+            const content = item.error?.message || texts.join('\n') || fallbackText;
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: item.error?.message || text, isError: !!item.error },
+              {
+                kind: 'tool_result',
+                toolUseId: item.id,
+                content,
+                isError: !!item.error,
+                attachments: attachments.length > 0 ? attachments : undefined,
+              },
             ];
           }
           case 'dynamicToolCall': {
-            const text = item.contentItems?.map(c => c.text || '').filter(Boolean).join('\n') || JSON.stringify(item.result ?? '');
+            const texts: string[] = [];
+            const attachments: ToolAttachment[] = [];
+            for (const ci of item.contentItems ?? []) {
+              if (ci.type === 'inputText' && typeof ci.text === 'string') {
+                texts.push(ci.text);
+              } else if (ci.type === 'inputImage' && typeof ci.imageUrl === 'string') {
+                // imageUrl is typically a data URL or https URL — saveToolAttachment
+                // handles both branches (data: routes through base64).
+                const ctx = attachCtx('image/png', undefined, `codex.dynamic.${item.namespace ?? ''}.${item.tool ?? ''}`);
+                attachments.push(this.scheduleAttachmentSave(
+                  { kind: 'url', url: ci.imageUrl },
+                  ctx,
+                  asyncEmit,
+                ));
+              }
+            }
+            const content = texts.length === 0 && attachments.length === 0
+              ? JSON.stringify(item.result ?? '')
+              : texts.join('\n');
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: text, isError: item.success === false },
+              {
+                kind: 'tool_result',
+                toolUseId: item.id,
+                content,
+                isError: item.success === false,
+                attachments: attachments.length > 0 ? attachments : undefined,
+                metadata: { durationMs: item.durationMs ?? null },
+              },
             ];
           }
           case 'webSearch': {
             const parts: string[] = [];
             if (item.query) parts.push(`Query: ${item.query}`);
-            if (item.action?.url) parts.push(`URL: ${item.action.url}`);
+            const action = item.action;
+            if (action) {
+              if (action.type === 'search' && Array.isArray(action.queries) && action.queries.length > 0) {
+                parts.push(`Queries: ${action.queries.join(' | ')}`);
+              } else if (action.type === 'openPage' && action.url) {
+                parts.push(`URL: ${action.url}`);
+              } else if (action.type === 'findInPage') {
+                if (action.url) parts.push(`URL: ${action.url}`);
+                if (action.pattern) parts.push(`Pattern: ${action.pattern}`);
+              }
+            }
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
               { kind: 'tool_result', toolUseId: item.id, content: parts.join('\n') || 'Search completed' },
@@ -949,11 +1142,82 @@ export class CodexRuntime implements AgentRuntime {
               { kind: 'tool_use_stop', toolUseId: item.id },
               { kind: 'tool_result', toolUseId: item.id, content: item.path || 'Image viewed' },
             ];
-          case 'imageGeneration':
+          case 'imageGeneration': {
+            // PRD 0.2.15 — the core fix. Prior code only read revisedPrompt/status
+            // and dropped the actual image bytes on the floor.
+            //
+            // Sources, in preference order:
+            //   1. savedPath (Codex v0.117+ auto-saved file in its cache) → zero-copy reference
+            //   2. result (base64 image bytes from OpenAI image_generation_call) → decode + write
+            const attachments: ToolAttachment[] = [];
+            const caption = typeof item.revisedPrompt === 'string' ? item.revisedPrompt : undefined;
+            const mime = 'image/png';
+
+            if (typeof item.savedPath === 'string' && item.savedPath) {
+              attachments.push(this.scheduleAttachmentSave(
+                { kind: 'externalPath', sourcePath: item.savedPath },
+                attachCtx(mime, caption, 'codex.image_generation'),
+                asyncEmit,
+              ));
+            } else if (typeof (item as Record<string, unknown>).result === 'string') {
+              const b64 = (item as Record<string, unknown>).result as string;
+              if (b64) {
+                attachments.push(this.scheduleAttachmentSave(
+                  { kind: 'base64', data: b64 },
+                  attachCtx(mime, caption, 'codex.image_generation'),
+                  asyncEmit,
+                ));
+              }
+            }
+
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: item.revisedPrompt || item.status || 'Image generated' },
+              {
+                kind: 'tool_result',
+                toolUseId: item.id,
+                content: caption || item.status || 'Image generated',
+                attachments: attachments.length > 0 ? attachments : undefined,
+              },
             ];
+          }
+          case 'plan': {
+            // PRD 0.2.15 — Codex `plan` items were previously dropped (parsed as
+            // null in the default branch). They mirror CC's thinking blocks, so
+            // re-map: started → thinking_start (synthesized at parseNotification
+            // started branch below), completed → thinking_stop here. Text comes
+            // through item/plan/delta as thinking_delta already.
+            return { kind: 'thinking_stop', index: 0 };
+          }
+          case 'collabAgentToolCall': {
+            // PRD 0.2.15 — multi-agent collab tool was completely dropped before.
+            const parts: string[] = [];
+            if (item.tool) parts.push(`Tool: ${item.tool}`);
+            if (item.prompt) parts.push(`Prompt: ${item.prompt}`);
+            if (item.model) parts.push(`Model: ${item.model}`);
+            if (item.senderThreadId) parts.push(`From: ${item.senderThreadId}`);
+            if (Array.isArray(item.receiverThreadIds) && item.receiverThreadIds.length > 0) {
+              parts.push(`To: ${item.receiverThreadIds.join(', ')}`);
+            }
+            return [
+              { kind: 'tool_use_stop', toolUseId: item.id },
+              { kind: 'tool_result', toolUseId: item.id, content: parts.join('\n') || 'Collab agent invoked' },
+            ];
+          }
+          case 'enteredReviewMode':
+          case 'exitedReviewMode': {
+            // PRD 0.2.15 — surface review-mode transitions as log events so the
+            // user sees them in the chat log panel; no tool card needed.
+            return {
+              kind: 'log',
+              level: 'info',
+              message: `[codex] ${item.type === 'enteredReviewMode' ? 'Entered' : 'Exited'} review mode${item.review ? `: ${item.review}` : ''}`,
+            };
+          }
+          case 'hookPrompt': {
+            // Codex hooks inject prompt fragments at session boundaries. Surface
+            // as a log line so the user knows extra context was injected.
+            return { kind: 'log', level: 'info', message: '[codex] Hook prompt fragment injected' };
+          }
           case 'reasoning':
             return { kind: 'thinking_stop', index: 0 };
           case 'agentMessage': {
@@ -983,6 +1247,9 @@ export class CodexRuntime implements AgentRuntime {
             return { kind: 'text_stop' };
           }
           default:
+            // Codex review W4 — log unknown item types so future Codex versions
+            // are visible in production triage.
+            console.warn(`[codex] item/completed: unhandled item.type=${(item as { type?: string }).type}`);
             return null;
         }
       }

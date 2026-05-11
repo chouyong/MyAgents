@@ -9,6 +9,7 @@ function _w(fn) {
 
 export function ensureConfiguredBindingRouteReady() { _w('ensureConfiguredBindingRouteReady'); return undefined; }
 export function resolveConfiguredBindingRoute() { _w('resolveConfiguredBindingRoute'); return undefined; }
+export function resolveRuntimeConversationBindingRoute() { _w('resolveRuntimeConversationBindingRoute'); return undefined; }
 export function getSessionBindingService() { _w('getSessionBindingService'); return undefined; }
 export function isPluginOwnedSessionBindingRecord() { _w('isPluginOwnedSessionBindingRecord'); return false; }
 export function buildPairingReply() { _w('buildPairingReply'); return undefined; }

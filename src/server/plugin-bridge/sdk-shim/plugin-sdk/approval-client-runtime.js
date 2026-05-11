@@ -9,6 +9,6 @@ function _w(fn) {
 
 export function createChannelExecApprovalProfile() { _w('createChannelExecApprovalProfile'); return undefined; }
 export function getExecApprovalReplyMetadata() { _w('getExecApprovalReplyMetadata'); return undefined; }
-export const isChannelExecApprovalClientEnabledFromConfig = undefined;
+export function isChannelExecApprovalClientEnabledFromConfig() { _w('isChannelExecApprovalClientEnabledFromConfig'); return false; }
 export function isChannelExecApprovalTargetRecipient() { _w('isChannelExecApprovalTargetRecipient'); return false; }
 export function matchesApprovalRequestFilters() { _w('matchesApprovalRequestFilters'); return undefined; }

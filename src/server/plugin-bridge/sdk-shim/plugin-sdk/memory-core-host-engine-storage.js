@@ -19,9 +19,15 @@ export function parseEmbedding() { _w('parseEmbedding'); return undefined; }
 export function remapChunkLines() { _w('remapChunkLines'); return undefined; }
 export function runWithConcurrency() { _w('runWithConcurrency'); return undefined; }
 export function readMemoryFile() { _w('readMemoryFile'); return undefined; }
-export const resolveMemoryBackendConfig = undefined;
-export const ensureMemoryIndexSchema = undefined;
+export function buildMemoryReadResult() { _w('buildMemoryReadResult'); return undefined; }
+export function buildMemoryReadResultFromSlice() { _w('buildMemoryReadResultFromSlice'); return undefined; }
+export const DEFAULT_MEMORY_READ_LINES = undefined;
+export const DEFAULT_MEMORY_READ_MAX_CHARS = undefined;
+export function resolveMemoryBackendConfig() { _w('resolveMemoryBackendConfig'); return undefined; }
+export function ensureMemoryIndexSchema() { _w('ensureMemoryIndexSchema'); return undefined; }
 export function loadSqliteVecExtension() { _w('loadSqliteVecExtension'); return undefined; }
+export function closeMemorySqliteWalMaintenance() { _w('closeMemorySqliteWalMaintenance'); return undefined; }
+export function configureMemorySqliteWalMaintenance() { _w('configureMemorySqliteWalMaintenance'); return undefined; }
 export function requireNodeSqlite() { _w('requireNodeSqlite'); return undefined; }
 export function isFileMissingError() { _w('isFileMissingError'); return false; }
 export function statRegularFile() { _w('statRegularFile'); return undefined; }

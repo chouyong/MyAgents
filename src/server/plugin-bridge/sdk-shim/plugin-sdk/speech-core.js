@@ -18,11 +18,18 @@ export function canonicalizeSpeechProviderId() { _w('canonicalizeSpeechProviderI
 export function getSpeechProvider() { _w('getSpeechProvider'); return undefined; }
 export function listSpeechProviders() { _w('listSpeechProviders'); return []; }
 export function normalizeSpeechProviderId() { _w('normalizeSpeechProviderId'); return ""; }
+export function resolveEffectiveTtsConfig() { _w('resolveEffectiveTtsConfig'); return undefined; }
 export function normalizeTtsAutoMode() { _w('normalizeTtsAutoMode'); return ""; }
 export const TTS_AUTO_MODES = undefined;
 export function asBoolean() { _w('asBoolean'); return undefined; }
 export function asFiniteNumber() { _w('asFiniteNumber'); return undefined; }
 export function asObject() { _w('asObject'); return undefined; }
+export function assertOkOrThrowProviderError() { _w('assertOkOrThrowProviderError'); return undefined; }
+export function createProviderHttpError() { _w('createProviderHttpError'); return undefined; }
+export function extractProviderErrorDetail() { _w('extractProviderErrorDetail'); return undefined; }
+export function extractProviderRequestId() { _w('extractProviderRequestId'); return undefined; }
+export function formatProviderErrorPayload() { _w('formatProviderErrorPayload'); return ""; }
+export function formatProviderHttpErrorMessage() { _w('formatProviderHttpErrorMessage'); return ""; }
 export function readResponseTextLimited() { _w('readResponseTextLimited'); return undefined; }
 export function trimToUndefined() { _w('trimToUndefined'); return undefined; }
 export function truncateErrorDetail() { _w('truncateErrorDetail'); return undefined; }

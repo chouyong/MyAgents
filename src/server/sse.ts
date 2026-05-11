@@ -100,6 +100,7 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:tool-use-start': 'critical',
   'chat:tool-result-start': 'critical',
   'chat:tool-result-complete': 'critical',
+  'chat:tool-attachment-update': 'critical', // PRD 0.2.15 — placeholder fulfillment must reach UI (replaces loading skeleton)
   'chat:server-tool-use-start': 'critical',
   'chat:subagent-tool-use': 'critical',
   'chat:subagent-tool-result-start': 'critical',

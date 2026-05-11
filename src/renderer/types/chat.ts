@@ -14,6 +14,9 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk/sdk-tools';
 
 import type { ToolUse } from '@/types/stream';
+import type { ToolAttachment } from '../../shared/types/tool-attachment';
+
+export type { ToolAttachment, ToolAttachmentKind } from '../../shared/types/tool-attachment';
 
 // Re-export SDK types with friendly names
 export type ReadInput = FileReadInput;
@@ -103,6 +106,9 @@ export interface ToolUseSimple extends ToolUse {
   taskStartTime?: number;
   // Task tool specific: running statistics
   taskStats?: TaskStats;
+  // PRD 0.2.15 — rich-media attachments (image/audio/pdf/file) produced by the tool.
+  // Rendered uniformly via ToolAttachmentGallery; orthogonal to `result` text.
+  attachments?: ToolAttachment[];
 }
 
 export interface ContentBlock {

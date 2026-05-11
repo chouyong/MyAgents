@@ -534,6 +534,48 @@ installer.ts         — 扫描 SKILL.md / marketplace.json → InstallAnalysis
 
 ---
 
+### 18. Tool Attachment 一等公民管道 (v0.2.15)
+
+AI 运行时（Codex / 未来 Gemini / CC / builtin）产出的富媒体（图片为主，预留音频/PDF）走同一条
+`UnifiedEvent.tool_result.attachments[]` 通道，前端用单一 `ToolAttachmentGallery` 组件渲染。
+本期 wire 上 Codex Runtime；builtin SDK / Gemini / CC 接入留 v0.2.16+。
+
+**关键设计：**
+
+- **协议一等公民**：`UnifiedEvent.tool_result` 加 optional `attachments?: ToolAttachment[]`；新增
+  `tool_attachment_update` event 用于异步 placeholder 填充。`PersistContentBlock.tool.attachments?`
+  随之扩展，老 sessions 反序列化时该字段 undefined，向后兼容
+- **三种落盘源**：base64（OpenAI `image_generation_call.result`）/ externalPath（Codex savedPath
+  零拷贝引用）/ url（dynamicToolCall.imageUrl 走 cancellableFetch 拉取）
+- **异步落盘不阻塞 SSE**：`scheduleAttachmentSave` fire-and-forget，先 emit placeholder + pendingId，
+  落盘成功后 `tool_attachment_update` 第二轮 SSE patch；`persistTurnResult` 进入即
+  `await awaitInFlightSaves()` 防 placeholder 飞越 turn 边界 stranded 在磁盘上
+- **session resume 重 register**：`rebuildAttachmentRegistryFromBlocks` 在 `startExternalSession`
+  载入历史时调用，把 Codex savedPath 重新注册进 in-process registry，解决 sidecar restart 后
+  attachment 404
+- **5 层路径校验**：blacklist + canonicalize symlinks（读侧 default true）+ 拒绝 symlink leaf +
+  positive allow-list（仅 `~/.codex/` `~/.myagents/` `~/Documents/` 等）+ trusted root（写侧）
+- **SSRF 防护**：URL 下载限定 `https:` + 拒绝 loopback / RFC1918 / 169.254/16 / IPv6 ULA +
+  `redirect: 'error'`
+- **错误暴露面**：`makeErrorAttachment` 把 throw 映射到固定 enum（`too_large` / `rejected_path` /
+  `not_found` / `fetch_failed` / `unsupported_url` / `decode_failed` / `unknown`）；raw error.message
+  不进 SSE / 不写 SessionStore（防绝对路径泄漏）
+- **前端归一化**：`ToolUse.tsx` 在 specialized tool body 之后外挂 `ToolAttachmentGallery`；
+  `TOOLS_THAT_OWN_GALLERY_PREFIXES = ['mcp__gemini-image__']` 老组件兜底自渲染避免双重显示；
+  `mergeAttachmentsByPendingId` 防 `tool-result-complete` 重发覆盖已 patched 的 entry
+
+**多 Sidecar 边界**：attachment endpoint 注册在每个 Sidecar 的 HTTP server 上，Sidecar Owner 模型
+决定 attachments 由 sessionOwner sidecar 持有；Handover scenario 4 切到目标 Sidecar 时通过
+SessionStore 反查 attachments 重 register。跨 Sidecar fetch attachment **不支持**。
+
+**HTTP endpoint**：`GET /api/attachment/tool/<sessionId>/<turnId>/<filename>`（CORS + Cache-Control
+immutable）。第一轮查内存 `externalPathRegistry`（Codex savedPath 命中），miss 后 fallback 到
+trusted root `~/.myagents/generated/tool-attachments/<sid>/<tid>/<file>`（base64/url 落盘命中）。
+
+详见 `tech_docs/tool_attachment_pipeline.md`。
+
+---
+
 ## Pit-of-Success 索引
 
 每个模块在 helper 层把"正确路径"做成默认。完整 Problem / Surface / Invariants / Don't 见 `tech_docs/pit_of_success.md`。
@@ -559,6 +601,8 @@ installer.ts         — 扫描 SKILL.md / marketplace.json → InstallAnalysis
 | Builtin MCP META/INSTANCE 懒加载 | Node | 防冷启动每次付 ~1s SDK+zod 税 |
 | Snapshot helpers | Node | owned vs live-follow 命名分裂 |
 | Legacy CronTask CAS upgrade | Rust | 幂等迁移（防并发重复创建） |
+| `saveToolAttachment` + `path-safety.ts` | Node | 任意工具图片产物统一落盘 + symlink-safe 路径校验 + SSRF 防护 |
+| `awaitInFlightSaves` + `rebuildAttachmentRegistry` | Node | 异步 attachment 落盘的 turn-boundary 守卫 + session resume 重 register |
 
 ---
 
@@ -732,6 +776,7 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 
 ### Multi-Agent Runtime / Agent / IM
 - [Multi-Agent Runtime](./tech_docs/multi_agent_runtime.md) — CC / Codex / Gemini 协议、会话管理、门控链路
+- [Tool Attachment 管道](./tech_docs/tool_attachment_pipeline.md) — 任意 runtime 产图归一化、落盘 helper、SSRF 防护、placeholder 异步落盘
 - [IM 集成技术架构](./tech_docs/im_integration_architecture.md) — Agent / Channel 详细设计、适配器模型
 - [Plugin Bridge 架构](./tech_docs/plugin_bridge_architecture.md) — OpenClaw 插件加载、SDK shim、CJS/ESM 混用插件 runtime 补丁
 

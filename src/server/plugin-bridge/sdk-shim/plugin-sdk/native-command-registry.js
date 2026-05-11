@@ -9,8 +9,10 @@ function _w(fn) {
 
 export function buildCommandTextFromArgs() { _w('buildCommandTextFromArgs'); return undefined; }
 export function findCommandByNativeName() { _w('findCommandByNativeName'); return undefined; }
+export function formatCommandArgMenuTitle() { _w('formatCommandArgMenuTitle'); return ""; }
 export function listChatCommands() { _w('listChatCommands'); return []; }
-export const listNativeCommandSpecsForConfig = undefined;
+export function listNativeCommandSpecs() { _w('listNativeCommandSpecs'); return []; }
+export function listNativeCommandSpecsForConfig() { _w('listNativeCommandSpecsForConfig'); return []; }
 export function parseCommandArgs() { _w('parseCommandArgs'); return undefined; }
 export function resolveCommandArgChoices() { _w('resolveCommandArgChoices'); return undefined; }
 export function resolveCommandArgMenu() { _w('resolveCommandArgMenu'); return undefined; }
