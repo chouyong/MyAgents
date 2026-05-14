@@ -22,6 +22,7 @@ import {
   saveProjects,
   redactSecret,
   findProvider,
+  findAgentByWorkspacePath,
   getProvidersDir,
   loadCustomProviderFiles,
   type AdminAppConfig,
@@ -1609,13 +1610,104 @@ export async function handleCronList(payload: { workspacePath?: string }): Promi
   return mgmtError(resp, 'Failed to list cron tasks');
 }
 
+/**
+ * Resolve effective providerId + model from the workspace context for a cron
+ * task being created without explicit provider info (issue #197 — `myagents
+ * cron add` without `--provider`/`--model` flags).
+ *
+ * Mirrors PRD 0.2.9 R7: every cron writer should forward `providerId` (live-
+ * resolve intent), not a frozen `providerEnv`. Renderer Chat already does
+ * this; the CLI path didn't, so CLI-created crons reached the sidecar with
+ * `provider_id=None + intent=FollowAgent` and the followAgent branch read
+ * `agent.providerEnvJson` (rarely set — renderer persists `providerId` only)
+ * → effectiveProviderEnv stayed undefined → SDK fell back to subscription
+ * (apiKeySource=none, model=claude-sonnet-4-6 default).
+ *
+ * Resolution order (most specific first):
+ *   1. agent.providerId          — workspace's explicit pick
+ *   2. config.defaultProviderId  — global default (covers the case where
+ *                                  user accepted the chat picker default
+ *                                  without explicitly switching, so the
+ *                                  pick was never persisted to the agent)
+ *   3. undefined                 — subscription mode (Anthropic-direct)
+ *
+ * When a providerId resolves, the model defaults to `agent.model` falling
+ * back to the provider's `primaryModel`. Without the `primaryModel`
+ * fallback, the SDK silently uses its built-in `claude-sonnet-4-6` default,
+ * which third-party endpoints reject as an unknown model.
+ */
+function resolveCronProviderDefaultsForWorkspace(workspacePath: string): {
+  providerId: string | undefined;
+  model: string | undefined;
+} {
+  const config = loadConfig();
+  const agent = findAgentByWorkspacePath(workspacePath);
+  const providerId = (agent?.providerId as string | undefined)
+    ?? (config.defaultProviderId as string | undefined);
+  if (!providerId) {
+    // Subscription mode: agent.model still meaningful (e.g. user picked an
+    // Anthropic model but cleared the provider). Pass it through.
+    return { providerId: undefined, model: agent?.model as string | undefined };
+  }
+  let model = agent?.model as string | undefined;
+  if (!model) {
+    const provider = findProvider(providerId);
+    if (provider) {
+      model = (provider as Record<string, unknown>).primaryModel as string | undefined;
+    }
+  }
+  return { providerId, model };
+}
+
 export async function handleCronCreate(payload: Record<string, unknown>): Promise<AdminResponse> {
   // Default workspacePath if caller didn't supply one. Rust requires the
   // field; without this default, every AI-issued `myagents cron add` would
   // 400 because the prompt examples (intentionally) don't mention --workspace.
-  const finalPayload = (payload.workspacePath || payload.workspace_path)
+  const resolvedWorkspacePath = (payload.workspacePath as string | undefined)
+    || (payload.workspace_path as string | undefined)
+    || defaultCronWorkspace();
+  let finalPayload: Record<string, unknown> = (payload.workspacePath || payload.workspace_path)
     ? payload
-    : { ...payload, workspacePath: defaultCronWorkspace() };
+    : { ...payload, workspacePath: resolvedWorkspacePath };
+
+  // Issue #197 — auto-capture provider/model from the workspace context when
+  // the caller didn't supply any provider hint. Renderer Chat already does
+  // this (Chat.tsx:2104); the CLI path was missing it, leaving CLI-created
+  // crons with empty provider context → SDK 403 at fire time. See
+  // `resolveCronProviderDefaultsForWorkspace` above for resolution order.
+  //
+  // We only default when the caller is silent about provider — explicit
+  // `providerId` / `providerEnv` / `providerIntent` (e.g., subscription) wins
+  // unchanged. Both camelCase and snake_case probed because admin payloads
+  // can come in either shape (CLI uses camelCase; Rust serde sometimes mirrors
+  // snake_case for legacy compat).
+  const hasExplicitProviderHint =
+    payload.providerId !== undefined ||
+    payload.provider_id !== undefined ||
+    payload.providerEnv !== undefined ||
+    payload.provider_env !== undefined ||
+    payload.providerIntent !== undefined ||
+    payload.provider_intent !== undefined;
+  if (!hasExplicitProviderHint) {
+    const defaults = resolveCronProviderDefaultsForWorkspace(resolvedWorkspacePath);
+    if (defaults.providerId) {
+      finalPayload = {
+        ...finalPayload,
+        providerId: defaults.providerId,
+        // Only fill model if caller didn't supply one. Pairing model with
+        // providerId is required by Rust's create-path validation
+        // (cron_task::create_task — `providerId 必须与 model 配对设置`).
+        ...(finalPayload.model === undefined && defaults.model
+          ? { model: defaults.model }
+          : {}),
+      };
+    } else if (defaults.model && finalPayload.model === undefined) {
+      // Subscription mode but agent has a model preference — pass it
+      // through so the sidecar uses the user's chosen Anthropic model
+      // (e.g. claude-opus-4-7) instead of falling back to the SDK default.
+      finalPayload = { ...finalPayload, model: defaults.model };
+    }
+  }
 
   // Issue #149: --dry-run was silently ignored — the previous implementation
   // forwarded payload to Rust regardless, so `cron add --dry-run` would

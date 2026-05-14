@@ -2589,6 +2589,32 @@ async function main() {
                   } catch (e) {
                     console.warn(`[cron] execute followAgent: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
                   }
+                } else if (resolved.providerId) {
+                  // Issue #197 — agent persists `providerId` (post-PRD 0.2.9
+                  // canonical state) but rarely a frozen `providerEnvJson`,
+                  // so the snapshot path was dropping provider context for
+                  // CLI/legacy crons that came in with intent=FollowAgent.
+                  // Live-resolve env from providerId so the SDK gets the
+                  // right ANTHROPIC_API_KEY/BASE_URL instead of falling
+                  // back to subscription (apiKeySource=none, model=
+                  // claude-sonnet-4-6 default).
+                  try {
+                    const env = resolveProviderEnv(resolved.providerId);
+                    if (env) {
+                      effectiveProviderEnv = env as ProviderEnv;
+                      // Pair model with provider when neither snapshot nor
+                      // agent has one — without this, SDK uses its default.
+                      if (effectiveModel === undefined) {
+                        const provider = findProvider(resolved.providerId);
+                        const primary = provider
+                          ? (provider as Record<string, unknown>).primaryModel as string | undefined
+                          : undefined;
+                        if (primary) effectiveModel = primary;
+                      }
+                    }
+                  } catch (e) {
+                    console.warn(`[cron] execute followAgent: failed to live-resolve providerId='${resolved.providerId}' for session ${currentSessionId}`, e);
+                  }
                 }
                 if (resolved.runtime !== 'builtin') {
                   effectiveRuntimeConfig = {
@@ -2873,6 +2899,27 @@ async function main() {
                   effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
                 } catch (e) {
                   console.warn(`[cron] execute-sync followAgent: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+                }
+              } else if (resolved.providerId) {
+                // Issue #197 — see /cron/execute above for the full rationale.
+                // Agent persists `providerId` (post-PRD 0.2.9 canonical state)
+                // but rarely a frozen `providerEnvJson`. Live-resolve env from
+                // providerId so the SDK gets the right credentials instead of
+                // falling back to subscription with empty apiKey.
+                try {
+                  const env = resolveProviderEnv(resolved.providerId);
+                  if (env) {
+                    effectiveProviderEnv = env as ProviderEnv;
+                    if (effectiveModel === undefined) {
+                      const provider = findProvider(resolved.providerId);
+                      const primary = provider
+                        ? (provider as Record<string, unknown>).primaryModel as string | undefined
+                        : undefined;
+                      if (primary) effectiveModel = primary;
+                    }
+                  }
+                } catch (e) {
+                  console.warn(`[cron] execute-sync followAgent: failed to live-resolve providerId='${resolved.providerId}' for session ${snapshotSessionId}`, e);
                 }
               }
               if (resolved.runtime !== 'builtin') {
