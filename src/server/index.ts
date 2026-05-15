@@ -8012,7 +8012,15 @@ async function main() {
             if (isAlways) {
               messageBlock += payload.isMention ? '[本条消息 @了你，你需要回复]\n' : '[本条消息未 @你]\n';
             }
-            messageBlock += payload.senderName ? `[from: ${sanitize(payload.senderName)} ${ts}]\n` : '';
+            // Fall back to senderId when the plugin didn't provide a senderName
+            // (WeCom's aibot_msg_callback only carries `from.userid`, no name —
+            // unlike Feishu which enriches senderName via contacts API). The
+            // Rust group_history writer (im/mod.rs:2393/2419) already does the
+            // same fallback; without it here the live message has no [from:]
+            // tag while history entries do, breaking the system-reminder's
+            // promise that "群内不同人的消息会以 [from: 名字 时间] 标注".
+            const displaySender = payload.senderName || payload.senderId;
+            messageBlock += displaySender ? `[from: ${sanitize(displaySender)} ${ts}]\n` : '';
             messageBlock += finalMessage;
             parts.push(messageBlock);
             finalMessage = parts.join('\n\n');
