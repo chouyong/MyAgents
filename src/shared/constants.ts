@@ -103,6 +103,22 @@ export const CUSTOM_EVENTS = {
      * Launcher's 历史对话 list.
      */
     OPEN_SESSION_IN_NEW_TAB: 'open-session-in-new-tab',
+    /**
+     * Fired when the global summon shortcut routes back to an already-active
+     * Launcher tab (no remount, so [mode]-triggered focus effect doesn't
+     * re-run). Launcher's BrandSection listens and calls inputRef.focus().
+     * PRD 0.2.16 §4.2.3 case 1/2.
+     */
+    FOCUS_LAUNCHER_INPUT: 'focus-launcher-input',
+    /**
+     * Fired from the global link context menu (LinkContextMenuProvider) when the
+     * user picks "预览（内置浏览器）" on an external link. Payload:
+     * `{ url: string }`. The currently active Chat tab listens; if its split
+     * BrowserPanel is available, it calls `preventDefault()` to claim the
+     * action. The dispatcher checks `defaultPrevented` and falls back to
+     * `openExternal()` (system browser) when no Chat tab handled it.
+     */
+    OPEN_IN_BROWSER_PANEL: 'open-in-browser-panel',
     // CONFIG_CHANGED removed — ConfigProvider shares state via Context, no DOM event bridge needed
     // Note: CRON_TASK_STOPPED event removed
     // With Session-centric Sidecar (Owner model), stopping a cron task only releases

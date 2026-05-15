@@ -322,6 +322,12 @@ export interface AppConfig {
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
   // General settings
   autoStart: boolean; // 开机启动
+  /** PRD 0.2.16 全局唤起快捷键。缺省视同 enabled=true + 默认键。
+   *  accelerator 形如 'CmdOrCtrl+Shift+M'（Tauri accelerator 语法）。 */
+  globalSummonShortcut?: {
+    enabled: boolean;
+    accelerator: string;
+  };
   // OS-level desktop notifications. When false, ALL notification trigger
   // points are suppressed at the Rust entry point (cron complete, task
   // complete, AI turn complete, permission request, ask-user-question,
@@ -1009,4 +1015,12 @@ export const DEFAULT_CONFIG: AppConfig = {
   autoStart: false,       // 默认不开启开机启动
   osNotifications: true,  // 默认开启系统通知
   notificationSound: true, // 默认开启通知声音
+  globalSummonShortcut: {
+    enabled: true,
+    accelerator: 'CmdOrCtrl+Shift+M',
+  },
 };
+
+/** Default accelerator string for the global summon shortcut (PRD 0.2.16).
+ *  Mirrors the Rust constant `global_shortcut::DEFAULT_ACCELERATOR`. */
+export const DEFAULT_SUMMON_ACCELERATOR = 'CmdOrCtrl+Shift+M';

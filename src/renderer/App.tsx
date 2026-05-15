@@ -6,6 +6,7 @@ import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, mark
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
+import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import TabProvider from '@/context/TabProvider';
 import { useToast } from '@/components/Toast';
@@ -2391,7 +2392,53 @@ export default function App() {
     return () => ac.abort();
   }, [handleSelectTab]);
 
+  // PRD 0.2.16 — global summon shortcut → Launcher route + focus.
+  // Three cases (decision tree in PRD §3.1 / §4.2.2):
+  //   1. Active tab is Launcher  → fire FOCUS_LAUNCHER_INPUT event so the
+  //      already-mounted BrandSection re-focuses its textarea (the
+  //      `useEffect(...,[mode])` doesn't re-run on bare summons).
+  //   2. Another tab is Launcher → switch to it. Its prevIsActiveRef path
+  //      + mode effect handle focus naturally on the activate transition.
+  //   3. No Launcher tab        → create one. createNewTab() default view
+  //      is 'launcher', and BrandSection mounts with the focus effect.
+  // Rust handles show/hide window state; we only handle in-app routing.
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+    const ac = new AbortController();
+    void listenWithCleanup('app:summon-launcher', () => {
+      const currentTabs = tabsRef.current;
+      const activeId = activeTabIdRef.current;
+      const activeTab = currentTabs.find((t) => t.id === activeId);
+
+      if (activeTab?.view === 'launcher') {
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.FOCUS_LAUNCHER_INPUT));
+        return;
+      }
+
+      const existingLauncher = currentTabs.find((t) => t.view === 'launcher');
+      if (existingLauncher) {
+        setActiveTabId(existingLauncher.id);
+        // Also fire the focus event — if the launcher was mounted but not
+        // active, its mode-effect won't re-run on activation; the
+        // prevIsActiveRef path already handles task-center-data refresh,
+        // but textarea focus needs an explicit signal.
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.FOCUS_LAUNCHER_INPUT));
+        return;
+      }
+
+      if (currentTabs.length >= MAX_TABS) {
+        console.warn(`[App] summon: max tabs (${MAX_TABS}) reached, cannot open Launcher`);
+        return;
+      }
+      const newTab = createNewTab();
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+    }, ac.signal);
+    return () => ac.abort();
+  }, []);
+
   return (
+    <LinkContextMenuProvider>
     <div className="flex h-screen flex-col bg-[var(--paper)]">
       {/* Chrome-style titlebar with tabs */}
       <CustomTitleBar
@@ -2508,5 +2555,6 @@ export default function App() {
         />
       )}
     </div>
+    </LinkContextMenuProvider>
   );
 }

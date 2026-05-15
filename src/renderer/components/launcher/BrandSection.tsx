@@ -237,6 +237,22 @@ export default memo(function BrandSection({
         }
     }, [mode]);
 
+    // PRD 0.2.16 — global summon may route to an already-mounted Launcher
+    // (active tab is launcher, or another launcher tab is brought forward).
+    // Neither case re-fires the [mode] effect above, so we need an explicit
+    // focus signal from App.tsx's summon listener.
+    useEffect(() => {
+        const handler = () => {
+            if (mode === 'thought') {
+                thoughtInputRef.current?.focus();
+            } else {
+                inputRef.current?.focus();
+            }
+        };
+        window.addEventListener(CUSTOM_EVENTS.FOCUS_LAUNCHER_INPUT, handler);
+        return () => window.removeEventListener(CUSTOM_EVENTS.FOCUS_LAUNCHER_INPUT, handler);
+    }, [mode]);
+
     // PRD 0.2.7 D3: switching workspaces in the launcher invalidates any
     // workspace-bound draft state — `@myagents_files/...` references point to
     // files in the previous workspace's `myagents_files/`, `images[]`
