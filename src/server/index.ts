@@ -582,6 +582,7 @@ import {
   getExternalSessionPermissionMode,
   prewarmExternalSession,
   awaitExternalSessionStarting,
+  getCurrentBoundSessionId,
   popLastUserMessageForRetry,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
@@ -3847,46 +3848,49 @@ async function main() {
         // session and pollute the log with misleading "session not found" errors.
         // Handle external runtime directly without consulting builtin's store.
         if (shouldUseExternalRuntime()) {
-          // Wait for any in-flight startExternalSession (pre-warm handshake)
-          // to finish. Without this, user clicking session history during the
-          // 10–14s pre-warm spawn-and-handshake window sees `isExternalSessionActive()`
-          // = false → stopExternalSession is skipped → restoreExternalSessionState
-          // resets module state (lastSessionId, etc.) → the still-spawning prewarm
-          // subprocess for session-A then writes its post-spawn assignments
-          // against state that now believes it's session-B. Mirrors the
-          // serialization in setExternalModel/setExternalPermissionMode.
+          // Fast path: the Sidecar is already (or about to be) bound to this
+          // session. Boot's restoreExternalSessionState and any in-flight prewarm
+          // both converge on the same module state, so a switch into that target
+          // is a no-op. Skipping the prewarm await here is what makes opening
+          // Gemini session history feel instant instead of paying the 8-10s
+          // CLI cold-start. sendExternalMessage's own startingPromise guard
+          // (external-session.ts) still serializes any user message that races
+          // an in-flight prewarm, so this fast return is safe.
+          if (getCurrentBoundSessionId() === payload.sessionId) {
+            return jsonResponse({ success: true, sessionId: payload.sessionId });
+          }
+
+          // Cross-session switch: must serialize against any in-flight prewarm
+          // so its post-spawn writes (lastSessionId / lastModel / etc.) don't
+          // clobber the state restoreExternalSessionState is about to set up
+          // for the new target. Mirrors the guard in setExternalModel /
+          // setExternalPermissionMode (different races, same serialization).
           await awaitExternalSessionStarting();
 
-          const isCurrentlyActive = isExternalSessionActive() && payload.sessionId === getExternalSessionId();
+          // Validate target: cross-session switches must point at a real
+          // persisted session — same-target switches were already handled by
+          // the fast path above and don't require metadata (a freshly-prewarmed
+          // session writes metadata only on first user message).
           const meta = getSessionMetadata(payload.sessionId);
-
-          // Validate target: must be either the current live session, or a
-          // persisted session whose runtime matches this sidecar. Without this,
-          // a typo'd sessionId would silently succeed and the next user message
-          // would create a fresh session under the wrong id (parity with
-          // builtin's switchToSession which 404s on unknown ids).
-          if (!isCurrentlyActive && !meta) {
+          if (!meta) {
             return jsonResponse({ success: false, error: 'Session not found.' }, 404);
           }
-          // Cross-runtime guard — if the persisted session was created by a
-          // different runtime, refuse to attach. The cross-runtime fork flow
-          // is initiated by the frontend creating a new session, not by
-          // switching into the old one.
-          if (meta?.runtime && meta.runtime !== getActiveRuntimeType()) {
+          // Cross-runtime guard — refuse to attach to a session created by
+          // a different runtime. The cross-runtime fork flow goes through
+          // new-session creation, not switch.
+          if (meta.runtime && meta.runtime !== getActiveRuntimeType()) {
             return jsonResponse(
               { success: false, error: `Session runtime mismatch: persisted=${meta.runtime}, current=${getActiveRuntimeType()}` },
               409,
             );
           }
 
-          // Switching to a DIFFERENT live external session — tear down current first.
-          // Reopening the same running session must attach, not interrupt.
-          if (isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
+          // Tear down the previous live session before binding to the new
+          // one. (Same-target reattach was handled by the fast path; if we
+          // reach here, the bound session is genuinely different.)
+          if (isExternalSessionActive()) {
             await stopExternalSession();
           }
-          // Idempotent — sets up resume state (runtimeSessionId / threadId / lastModel
-          // etc.) for the next user message. Safe for already-active sessions
-          // (sessionId === lastSessionId skips the state reset inside).
           restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
           console.log(`[sessions] Switched to external session: ${payload.sessionId}`);
           return jsonResponse({ success: true, sessionId: payload.sessionId });

@@ -43,6 +43,12 @@ let activeRuntime: AgentRuntime | null = null;
 let isRunning = false;
 let turnCompleted = false;
 let startingPromise: Promise<void> | null = null;  // Guard against concurrent startExternalSession
+// Target sessionId of the in-flight startExternalSession. Set the moment
+// startExternalSession is called (before _doStartExternalSession's spawn-and-handshake
+// even begins), cleared in finally. Lets /sessions/switch detect that an in-flight
+// prewarm is going to land on the same session it wants to switch to — making the
+// switch a no-op without paying the 8-10s gemini --acp cold-start.
+let startingSessionId: string | null = null;
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null;  // Hung process detection
 
 // Track session context for multi-turn resume (CC -p mode exits after each turn)
@@ -158,6 +164,7 @@ function resetModuleState(): void {
   isRunning = false;
   turnCompleted = false;
   startingPromise = null;
+  startingSessionId = null;
   if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
   lastRuntimeSessionId = '';
   lastModel = '';
@@ -685,6 +692,15 @@ export function getExternalSessionId(): string {
   return lastSessionId;
 }
 
+/** The session this Sidecar is bound to right now — either already committed
+ *  (lastSessionId, set by restoreExternalSessionState at boot or by a completed
+ *  start) or about to be committed by an in-flight prewarm/start (startingSessionId).
+ *  Used by /sessions/switch to detect a no-op switch (target matches the bound
+ *  session) without awaiting the prewarm's CLI cold-start. */
+export function getCurrentBoundSessionId(): string {
+  return startingSessionId || lastSessionId;
+}
+
 export function getExternalSessionModel(): string | null {
   return lastRuntimeReportedModel || lastModel || null;
 }
@@ -861,14 +877,20 @@ export async function startExternalSession(options: {
     return;
   }
 
-  // Wrap the body so concurrent callers serialize via startingPromise
+  // Wrap the body so concurrent callers serialize via startingPromise.
+  // startingSessionId is set BEFORE _doStartExternalSession runs so that any
+  // concurrent /sessions/switch into the same target can short-circuit even
+  // while the spawn is still mid-flight (lastSessionId isn't written until
+  // _doStartExternalSession reaches its session-context-bind step).
   let resolveStarting: () => void;
   startingPromise = new Promise(r => { resolveStarting = r; });
+  startingSessionId = options.sessionId;
 
   try {
     await _doStartExternalSession(options);
   } finally {
     startingPromise = null;
+    startingSessionId = null;
     resolveStarting!();
   }
 }
