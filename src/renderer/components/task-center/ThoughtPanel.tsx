@@ -510,19 +510,42 @@ export function ThoughtPanel({
         </div>
       </div>
 
-      {/* Input — new thought. Hidden in archived view because a brand new
-          thought is always active, and prepending it to the archived list
-          would create a card that "vanishes" on the next reload. v0.2.16. */}
-      {viewMode === 'active' && (
-        <div className="p-3">
-          <ThoughtInput
-            onCreated={(t) => setThoughts((prev) => [t, ...prev])}
-            existingTags={tagCandidates}
-            autoFocus={autoFocusInput}
-            minLines={3}
-          />
-        </div>
-      )}
+      {/* Input — new thought. Always visible regardless of viewMode (active
+          vs. archived); the toggle below the input only filters the list, it
+          shouldn't gate "create a new thought". v0.2.16 design correction:
+          previously this was wrapped in `viewMode === 'active'`, which made
+          users in the archived tab unable to write a new thought without
+          flipping back first.
+          Behaviour when creating from archived view:
+            • new thought is always active (Thought.archived defaults to false)
+            • optimistic prepend into `thoughts` would create a card that
+              vanishes on next reload (the archived list doesn't contain it),
+              so we instead flip viewMode → 'active' and clear filters; the
+              `useEffect([reload, ...])` re-fetches the active list and the
+              freshly created thought lands at the top as expected. */}
+      <div className="p-3">
+        <ThoughtInput
+          onCreated={(t) => {
+            if (viewMode === 'archived') {
+              // Switching view will trigger reload() (via useCallback dep on
+              // viewMode). Drop search/tag filters too so the new thought
+              // — which may not match them — is guaranteed visible.
+              setViewMode('active');
+              setActiveTag(null);
+              setQuery('');
+              // Seed the active list with the new thought so the user sees
+              // it even before the reload fetch returns. reload() will
+              // overwrite with authoritative data right after.
+              setThoughts([t]);
+            } else {
+              setThoughts((prev) => [t, ...prev]);
+            }
+          }}
+          existingTags={tagCandidates}
+          autoFocus={autoFocusInput}
+          minLines={3}
+        />
+      </div>
 
       {/* Dynamic list header — occupies a consistent row above the cards
           so the layout doesn't shift when the filter chip appears:
