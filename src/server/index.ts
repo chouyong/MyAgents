@@ -6939,11 +6939,41 @@ async function main() {
         }
       }
 
-      // POST /api/plugin/install - install from URL/path; broadcasts progress
+      // POST /api/cc-plugin/inspect - resolve + fetch + analyse WITHOUT
+      // writing. Used by the install dialog to decide whether to show the
+      // direct-install path or the multi-plugin picker (batch import).
+      // Returns the analysis verbatim — multi-plugin mode carries per-
+      // candidate manifest data so the picker can render name/version/desc.
+      if (pathname === '/api/cc-plugin/inspect' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { sourceUrl?: string };
+          if (!body.sourceUrl || typeof body.sourceUrl !== 'string') {
+            return jsonResponse({ success: false, error: 'sourceUrl 参数必填' }, 400);
+          }
+          const { inspectPluginSource } = await import('./plugins/store');
+          const analysis = await inspectPluginSource(body.sourceUrl);
+          return jsonResponse({ success: true, sourceUrl: body.sourceUrl, analysis });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Inspect failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          if (status >= 500) {
+            console.error('[api/cc-plugin/inspect] Error:', error);
+          }
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/cc-plugin/install - install from URL/path; broadcasts progress.
+      // Optional `subPath` body param picks one candidate out of a
+      // multi-plugin tree — used by the batch install loop in the picker UI.
       if (pathname === '/api/cc-plugin/install' && request.method === 'POST') {
         let installId: string | undefined;
         try {
-          const body = (await request.json()) as { sourceUrl?: string; installId?: string };
+          const body = (await request.json()) as {
+            sourceUrl?: string;
+            installId?: string;
+            subPath?: string;
+          };
           if (!body.sourceUrl || typeof body.sourceUrl !== 'string') {
             return jsonResponse({ success: false, error: 'sourceUrl 参数必填' }, 400);
           }
@@ -6958,6 +6988,7 @@ async function main() {
             onProgress: (phase, message) => {
               broadcast('plugin:install-progress', { installId: finalId, phase, message });
             },
+            subPath: typeof body.subPath === 'string' && body.subPath ? body.subPath : undefined,
           });
           broadcast('plugin:install-progress', { installId: finalId, phase: 'done' });
           broadcast('plugins:changed', { reason: 'install' });

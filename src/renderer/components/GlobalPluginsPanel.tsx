@@ -41,6 +41,7 @@ import type {
   PluginListItem,
   PluginInstallProgressEvent,
   PluginComponentInventory,
+  PluginManifest,
 } from '../../shared/types/plugin';
 
 type ViewState =
@@ -570,10 +571,56 @@ function ComponentBlock({
 }
 
 // ============================================================================
-// Install Dialog
+// Install Dialog — three views (input → optional picker → installing)
 // ============================================================================
 
 type InstallPhase = PluginInstallProgressEvent['phase'];
+
+interface PluginCandidate {
+  rootPath: string;
+  manifest?: PluginManifest;
+  manifestError?: string;
+}
+
+/** Server-side analysis shape returned by /api/cc-plugin/inspect. Kept in
+ *  sync with installer.PluginAnalysis (backend). Carrying it in renderer
+ *  lets us switch UI mode in a single round-trip. */
+type InspectAnalysis =
+  | { mode: 'plugin'; manifest: PluginManifest; rootPath: string }
+  | { mode: 'marketplace'; marketplaceName?: string; pluginNames: string[] }
+  | { mode: 'multi-plugin'; candidates: PluginCandidate[] }
+  | { mode: 'no-plugin' };
+
+interface InspectResponse {
+  success: boolean;
+  sourceUrl?: string;
+  analysis?: InspectAnalysis;
+  error?: string;
+}
+
+interface BatchResult {
+  rootPath: string;
+  name: string;
+  ok: boolean;
+  error?: string;
+}
+
+type DialogView =
+  | { kind: 'input' }
+  | {
+      kind: 'selecting';
+      sourceUrl: string;
+      candidates: PluginCandidate[];
+      selected: Set<string>;
+    }
+  | {
+      kind: 'installing';
+      sourceUrl: string;
+      queue: PluginCandidate[];
+      cursor: number;
+      currentName: string;
+      results: BatchResult[];
+    };
 
 function PluginInstallDialog({
   onClose,
@@ -584,28 +631,26 @@ function PluginInstallDialog({
 }) {
   const toast = useToast();
   const toastRef = useRef(toast);
-  // React 19's react-hooks/refs rule disallows assigning refs during render;
-  // sync via useEffect instead (no observable behaviour change — toast is a
-  // stable callback object across renders in practice).
   useEffect(() => { toastRef.current = toast; }, [toast]);
 
+  const [view, setView] = useState<DialogView>({ kind: 'input' });
   const [sourceUrl, setSourceUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const installIdRef = useRef<string | null>(null);
   const [phase, setPhase] = useState<InstallPhase | null>(null);
   const [phaseMsg, setPhaseMsg] = useState('');
 
-  // Cmd+W close — without this hook, Cmd+W skips the dialog and closes the
-  // Tab (CLAUDE.md "新增 overlay / 可关闭面板不调 useCloseLayer" red-line).
-  // Suppress closure while an install is in flight so user can't accidentally
-  // background a 60s download. z-index 300 matches the createPortal modal tier
-  // used by ConfirmDialog (the dialog lives in document.body, so z is global).
+  const isInstalling = view.kind === 'installing';
+  // Cmd+W close — suppressed while inspecting OR mid-batch so the user
+  // can't accidentally background work. z-index 300 matches the createPortal
+  // modal tier (z global because we portal to document.body).
   useCloseLayer(() => {
-    if (submitting) return false;
+    if (submitting || isInstalling) return false;
     onClose();
     return true;
   }, 300);
 
+  // SSE progress for single-plugin path (multi-plugin batch shows aggregate progress)
   useEffect(() => {
     const onProgress = (evt: Event) => {
       const detail = (evt as CustomEvent<PluginInstallProgressEvent>).detail;
@@ -619,18 +664,76 @@ function PluginInstallDialog({
     return () => window.removeEventListener('myagents:plugin-install-progress', onProgress);
   }, []);
 
-  const handleInstall = useCallback(async () => {
-    if (!sourceUrl.trim()) {
+  // ───── Step 1: inspect ──────────────────────────────────────────────────
+  // User submits URL → backend resolves+fetches+analyses without writing.
+  // Branch on returned analysis:
+  //   single plugin    → directly install (familiar flow)
+  //   multi-plugin     → switch to picker view (default all selected)
+  //   marketplace      → not supported in v0.2.17 (留 v0.2.18)
+  //   no-plugin        → friendly error
+  const handleSubmit = useCallback(async () => {
+    const url = sourceUrl.trim();
+    if (!url) {
       toastRef.current.error('请填写来源地址');
       return;
     }
     setSubmitting(true);
+    setPhase(null);
+    try {
+      const resp = await apiPostJson<InspectResponse>('/api/cc-plugin/inspect', {
+        sourceUrl: url,
+      });
+      if (!resp.success || !resp.analysis) {
+        toastRef.current.error(resp.error || '探测失败');
+        setSubmitting(false);
+        return;
+      }
+      const a = resp.analysis;
+      if (a.mode === 'plugin') {
+        // Single plugin — install directly (preserves the simple happy path).
+        await installSingle(url);
+        return;
+      }
+      if (a.mode === 'multi-plugin') {
+        setSubmitting(false);
+        setView({
+          kind: 'selecting',
+          sourceUrl: url,
+          candidates: a.candidates,
+          // Default all selected — matches "marketplace style" intent.
+          // Candidates with manifestError are auto-excluded so the user
+          // doesn't blow up the batch with known-bad entries.
+          selected: new Set(
+            a.candidates.filter(c => c.manifest && !c.manifestError).map(c => c.rootPath),
+          ),
+        });
+        return;
+      }
+      if (a.mode === 'marketplace') {
+        toastRef.current.error('Marketplace 仓库（.claude-plugin/marketplace.json）暂未支持，v0.2.18 加');
+        setSubmitting(false);
+        return;
+      }
+      // no-plugin
+      toastRef.current.error('未在该来源找到任何 Claude 插件');
+      setSubmitting(false);
+    } catch (err) {
+      console.error('[PluginInstallDialog] inspect failed:', err);
+      toastRef.current.error(err instanceof Error ? err.message : '探测失败');
+      setSubmitting(false);
+    }
+  // installSingle is stable (defined below with same useCallback deps)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceUrl]);
+
+  // ───── Single-plugin install (direct from input view) ───────────────────
+  const installSingle = useCallback(async (url: string) => {
     setPhase('fetching');
     const installId = crypto.randomUUID();
     installIdRef.current = installId;
     try {
       const resp = await apiPostJson<InstallResponse>('/api/cc-plugin/install', {
-        sourceUrl: sourceUrl.trim(),
+        sourceUrl: url,
         installId,
       });
       if (!resp.success) {
@@ -647,78 +750,448 @@ function PluginInstallDialog({
       setSubmitting(false);
       setPhase('failed');
     }
-  }, [sourceUrl, onInstalled]);
+  }, [onInstalled]);
 
-  // Portal to body — the Settings page lives inside several flex/overflow
-  // containers that create stacking contexts and trap z-index. Without
-  // portal, the modal renders behind sibling FloatingPortal content and
-  // the backdrop fails to cover the whole viewport. Matches the
-  // ConfirmDialog pattern that other modals use across the app.
+  // ───── Step 2: batch install of selected candidates ─────────────────────
+  // Sequential (not parallel) — concurrent same-host installs would burn
+  // GitHub rate limits and the disk write race protection in installPlugin
+  // assumes serial calls per name. Each candidate gets a fresh /install
+  // with a distinct subPath so it lands at ~/.myagents/plugins/<name>/.
+  const startBatch = useCallback(async (chosen: PluginCandidate[]) => {
+    if (chosen.length === 0) {
+      toastRef.current.error('请至少选择一个插件');
+      return;
+    }
+    const url = view.kind === 'selecting' ? view.sourceUrl : '';
+    setView({
+      kind: 'installing',
+      sourceUrl: url,
+      queue: chosen,
+      cursor: 0,
+      currentName: chosen[0]?.manifest?.name ?? chosen[0]?.rootPath ?? '',
+      results: [],
+    });
+
+    const results: BatchResult[] = [];
+    for (let i = 0; i < chosen.length; i++) {
+      const cand = chosen[i];
+      const name = cand.manifest?.name ?? cand.rootPath;
+      setView(prev => prev.kind === 'installing'
+        ? { ...prev, cursor: i, currentName: name, results: [...results] }
+        : prev);
+      try {
+        const resp = await apiPostJson<InstallResponse>('/api/cc-plugin/install', {
+          sourceUrl: url,
+          subPath: cand.rootPath,
+          installId: crypto.randomUUID(),
+        });
+        results.push({
+          rootPath: cand.rootPath,
+          name,
+          ok: !!resp.success,
+          error: resp.success ? undefined : resp.error,
+        });
+      } catch (err) {
+        results.push({
+          rootPath: cand.rootPath,
+          name,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Final summary toast — keep dialog open so user can review per-item
+    // status before closing (especially if some failed).
+    const ok = results.filter(r => r.ok).length;
+    const failed = results.length - ok;
+    setView(prev => prev.kind === 'installing'
+      ? { ...prev, cursor: prev.queue.length, currentName: '', results }
+      : prev);
+    if (failed === 0) {
+      toastRef.current.success(`已安装 ${ok} 个插件`);
+    } else {
+      toastRef.current.error(`安装完成：${ok} 个成功，${failed} 个失败`);
+    }
+    onInstalled();
+  }, [view, onInstalled]);
+
+  // ───── Render ──────────────────────────────────────────────────────────
   return createPortal(
     <OverlayBackdrop
-      onClose={submitting ? undefined : onClose}
+      onClose={submitting || isInstalling ? undefined : onClose}
       className="z-[300] px-4"
     >
-      <div className="glass-panel w-full max-w-lg">
-        <div className="border-b border-[var(--line)] px-5 py-4">
-          <h2 className="text-[14px] font-semibold text-[var(--ink)]">安装插件</h2>
-          <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
-            支持：GitHub 仓库（<code className="text-[11px]">owner/repo</code> 或完整 URL）、直链 zip、<code className="text-[11px]">file:///</code> 本地目录
-          </p>
-        </div>
-
-        <div className="space-y-3 px-5 py-4">
-          <label className="block">
-            <span className="text-[12px] text-[var(--ink-muted)]">来源地址</span>
-            <input
-              type="text"
-              value={sourceUrl}
-              onChange={(e) => setSourceUrl(e.target.value)}
-              disabled={submitting}
-              placeholder="anthropics/example-plugin 或 https://github.com/... 或 file:///..."
-              className="mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[13px] text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40 disabled:opacity-60"
-              autoFocus
-            />
-          </label>
-
-          <div className="rounded-lg border border-[var(--warning,#d97706)]/40 bg-[var(--warning,#d97706)]/10 px-3 py-2 text-[11px] text-[var(--warning,#d97706)]">
-            <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom" />
-            插件以你的用户权限运行任意代码 / 启动 MCP 进程 / 触发 hook 脚本。仅安装可信来源。
-          </div>
-
-          {phase && (
-            <div className="rounded-lg border border-[var(--line)] px-3 py-2 text-[12px]">
-              <div className="flex items-center gap-2">
-                {phase !== 'done' && phase !== 'failed' && <Loader2 className="h-3 w-3 animate-spin" />}
-                <span className="font-medium text-[var(--ink)]">{phaseLabel(phase)}</span>
-              </div>
-              {phaseMsg && <div className="mt-1 break-all text-[var(--ink-muted)]">{phaseMsg}</div>}
-            </div>
-          )}
-        </div>
-
-        <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={submitting}
-            className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            onClick={handleInstall}
-            disabled={submitting || !sourceUrl.trim()}
-            className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
-          >
-            {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
-            开始安装
-          </button>
-        </div>
+      <div className="glass-panel w-full max-w-2xl">
+        {view.kind === 'input' && (
+          <InputView
+            sourceUrl={sourceUrl}
+            setSourceUrl={setSourceUrl}
+            submitting={submitting}
+            phase={phase}
+            phaseMsg={phaseMsg}
+            onClose={onClose}
+            onSubmit={handleSubmit}
+          />
+        )}
+        {view.kind === 'selecting' && (
+          <SelectingView
+            sourceUrl={view.sourceUrl}
+            candidates={view.candidates}
+            selected={view.selected}
+            onToggle={(rootPath) => {
+              const next = new Set(view.selected);
+              if (next.has(rootPath)) next.delete(rootPath);
+              else next.add(rootPath);
+              setView({ ...view, selected: next });
+            }}
+            onSelectAll={() => {
+              const all = new Set(
+                view.candidates.filter(c => c.manifest && !c.manifestError).map(c => c.rootPath),
+              );
+              setView({ ...view, selected: all });
+            }}
+            onSelectNone={() => setView({ ...view, selected: new Set() })}
+            onBack={() => setView({ kind: 'input' })}
+            onConfirm={() => {
+              const chosen = view.candidates.filter(c => view.selected.has(c.rootPath));
+              void startBatch(chosen);
+            }}
+          />
+        )}
+        {view.kind === 'installing' && (
+          <InstallingView
+            queue={view.queue}
+            cursor={view.cursor}
+            currentName={view.currentName}
+            results={view.results}
+            // Final state: cursor === queue.length means all done.
+            done={view.cursor >= view.queue.length}
+            onClose={onClose}
+          />
+        )}
       </div>
     </OverlayBackdrop>,
     document.body,
+  );
+}
+
+// ─── input view ──────────────────────────────────────────────────────────
+function InputView({
+  sourceUrl,
+  setSourceUrl,
+  submitting,
+  phase,
+  phaseMsg,
+  onClose,
+  onSubmit,
+}: {
+  sourceUrl: string;
+  setSourceUrl: (v: string) => void;
+  submitting: boolean;
+  phase: InstallPhase | null;
+  phaseMsg: string;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <>
+      <div className="border-b border-[var(--line)] px-5 py-4">
+        <h2 className="text-[15px] font-semibold text-[var(--ink)]">安装插件</h2>
+        <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
+          支持：GitHub 仓库（<code className="text-[11px]">owner/repo</code> 或完整 URL）、直链 zip、<code className="text-[11px]">file:///</code> 本地目录
+        </p>
+      </div>
+
+      <div className="space-y-3 px-5 py-4">
+        <label className="block">
+          <span className="text-[12px] text-[var(--ink-muted)]">来源地址</span>
+          <input
+            type="text"
+            value={sourceUrl}
+            onChange={(e) => setSourceUrl(e.target.value)}
+            disabled={submitting}
+            placeholder="anthropics/example-plugin 或 https://github.com/... 或 file:///..."
+            className="mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[13px] text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40 disabled:opacity-60"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !submitting && sourceUrl.trim()) {
+                e.preventDefault();
+                onSubmit();
+              }
+            }}
+          />
+        </label>
+
+        <div className="rounded-lg border border-[var(--warning,#d97706)]/40 bg-[var(--warning,#d97706)]/10 px-3 py-2 text-[11px] text-[var(--warning,#d97706)]">
+          <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom" />
+          插件以你的用户权限运行任意代码 / 启动 MCP 进程 / 触发 hook 脚本。仅安装可信来源。
+        </div>
+
+        {phase && (
+          <div className="rounded-lg border border-[var(--line)] px-3 py-2 text-[12px]">
+            <div className="flex items-center gap-2">
+              {phase !== 'done' && phase !== 'failed' && <Loader2 className="h-3 w-3 animate-spin" />}
+              <span className="font-medium text-[var(--ink)]">{phaseLabel(phase)}</span>
+            </div>
+            {phaseMsg && <div className="mt-1 break-all text-[var(--ink-muted)]">{phaseMsg}</div>}
+          </div>
+        )}
+      </div>
+
+      <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={submitting}
+          className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={submitting || !sourceUrl.trim()}
+          className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+        >
+          {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+          开始安装
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ─── selecting view ──────────────────────────────────────────────────────
+function SelectingView({
+  sourceUrl,
+  candidates,
+  selected,
+  onToggle,
+  onSelectAll,
+  onSelectNone,
+  onBack,
+  onConfirm,
+}: {
+  sourceUrl: string;
+  candidates: PluginCandidate[];
+  selected: Set<string>;
+  onToggle: (rootPath: string) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
+  onBack: () => void;
+  onConfirm: () => void;
+}) {
+  const installable = candidates.filter(c => c.manifest && !c.manifestError);
+  const badCount = candidates.length - installable.length;
+  return (
+    <>
+      <div className="border-b border-[var(--line)] px-5 py-4">
+        <h2 className="text-[15px] font-semibold text-[var(--ink)]">选择要安装的插件</h2>
+        <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
+          来源：<span className="break-all">{sourceUrl}</span>
+        </p>
+        <p className="mt-0.5 text-[12px] text-[var(--ink-muted)]">
+          检测到 <b className="text-[var(--ink)]">{candidates.length}</b> 个插件
+          {badCount > 0 && `（其中 ${badCount} 个 manifest 无效，已跳过）`}
+          ，默认全选。
+        </p>
+      </div>
+
+      <div className="max-h-[50vh] overflow-y-auto px-5 py-3">
+        <ul className="space-y-1.5">
+          {candidates.map((cand) => {
+            const isSelected = selected.has(cand.rootPath);
+            const isBad = !cand.manifest || !!cand.manifestError;
+            const name = cand.manifest?.name ?? cand.rootPath;
+            return (
+              <li
+                key={cand.rootPath}
+                className={`rounded-lg border px-3 py-2 ${
+                  isBad
+                    ? 'border-amber-400/40 bg-amber-500/5'
+                    : isSelected
+                      ? 'border-[var(--accent)]/60 bg-[var(--accent)]/5'
+                      : 'border-[var(--line)]'
+                }`}
+              >
+                <label className={`flex items-start gap-3 ${isBad ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}>
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    disabled={isBad}
+                    onChange={() => onToggle(cand.rootPath)}
+                    className="mt-0.5 h-4 w-4 rounded border-[var(--line)]"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-baseline gap-2">
+                      <span className="truncate text-[14px] font-medium text-[var(--ink)]">
+                        {name}
+                      </span>
+                      {cand.manifest?.version && (
+                        <span className="shrink-0 text-[11px] text-[var(--ink-muted)]">
+                          v{cand.manifest.version}
+                        </span>
+                      )}
+                    </div>
+                    {cand.manifest?.description && (
+                      <p className="mt-0.5 text-[12px] text-[var(--ink-muted)]">
+                        {cand.manifest.description}
+                      </p>
+                    )}
+                    {cand.manifestError && (
+                      <p className="mt-0.5 text-[12px] text-amber-700 dark:text-amber-500">
+                        ⚠ {cand.manifestError}
+                      </p>
+                    )}
+                    {cand.rootPath && (
+                      <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--ink-muted)]">
+                        {cand.rootPath}
+                      </p>
+                    )}
+                  </div>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 border-t border-[var(--line)] px-5 py-3">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onSelectAll}
+            disabled={installable.length === 0}
+            className="rounded-full px-3 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-40"
+          >
+            全选
+          </button>
+          <button
+            type="button"
+            onClick={onSelectNone}
+            className="rounded-full px-3 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          >
+            全不选
+          </button>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
+          >
+            返回
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={selected.size === 0}
+            className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+          >
+            安装 {selected.size} 个插件
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ─── installing view ─────────────────────────────────────────────────────
+function InstallingView({
+  queue,
+  cursor,
+  currentName,
+  results,
+  done,
+  onClose,
+}: {
+  queue: PluginCandidate[];
+  cursor: number;
+  currentName: string;
+  results: BatchResult[];
+  done: boolean;
+  onClose: () => void;
+}) {
+  const total = queue.length;
+  const completed = done ? total : cursor;
+  const okCount = results.filter(r => r.ok).length;
+  const failedCount = results.filter(r => !r.ok).length;
+  const pct = total === 0 ? 0 : Math.round((completed / total) * 100);
+  return (
+    <>
+      <div className="border-b border-[var(--line)] px-5 py-4">
+        <h2 className="text-[15px] font-semibold text-[var(--ink)]">
+          {done ? '安装完成' : '正在批量安装'}
+        </h2>
+        <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
+          {done
+            ? `共 ${total} 个：成功 ${okCount}${failedCount > 0 ? `，失败 ${failedCount}` : ''}`
+            : `第 ${Math.min(completed + 1, total)} / ${total} 个 · ${currentName}`}
+        </p>
+      </div>
+
+      <div className="space-y-3 px-5 py-4">
+        {/* Progress bar — Tailwind-only, no third-party dep */}
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--line)]">
+          <div
+            className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+
+        <ul className="max-h-[40vh] space-y-1 overflow-y-auto text-[12px]">
+          {queue.map((cand, i) => {
+            const result = results.find(r => r.rootPath === cand.rootPath);
+            const name = cand.manifest?.name ?? cand.rootPath;
+            // States: pending (no result, not current) / in-flight (current) / ok / failed
+            let icon: React.ReactNode;
+            let textColor = 'text-[var(--ink-muted)]';
+            if (result) {
+              if (result.ok) {
+                icon = <span className="text-[var(--success,#16a34a)]">✓</span>;
+                textColor = 'text-[var(--ink)]';
+              } else {
+                icon = <span className="text-[var(--error)]">✗</span>;
+                textColor = 'text-[var(--error)]';
+              }
+            } else if (!done && i === cursor) {
+              icon = <Loader2 className="h-3 w-3 animate-spin text-[var(--accent)]" />;
+              textColor = 'text-[var(--ink)]';
+            } else {
+              icon = <span className="text-[var(--ink-muted)]">·</span>;
+            }
+            return (
+              <li key={cand.rootPath} className={`flex items-start gap-2 ${textColor}`}>
+                <span className="mt-0.5 inline-flex h-3 w-3 shrink-0 items-center justify-center">
+                  {icon}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate">{name}</div>
+                  {result?.error && (
+                    <div className="truncate text-[11px] text-[var(--error)] opacity-80">
+                      {result.error}
+                    </div>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={!done}
+          className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+        >
+          {!done && <Loader2 className="h-3 w-3 animate-spin" />}
+          {done ? '完成' : '安装中…'}
+        </button>
+      </div>
+    </>
   );
 }
 

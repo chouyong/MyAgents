@@ -27,10 +27,23 @@ import { parsePluginManifest } from './manifest';
 import type { PluginManifest } from '../../shared/types/plugin';
 import { isBrokenSymlink } from './fetcher';
 
+/**
+ * One candidate in a multi-plugin tree. Manifest is parsed eagerly so the
+ * inspect endpoint can surface name/version/description to the UI without a
+ * second round-trip. `manifestError` is set instead of throwing when an
+ * individual candidate's plugin.json is malformed — the rest of the picker
+ * should still work.
+ */
+export interface MultiPluginCandidate {
+  rootPath: string;
+  manifest?: PluginManifest;
+  manifestError?: string;
+}
+
 export type PluginAnalysis =
   | { mode: 'plugin'; manifest: PluginManifest; rootPath: string }
   | { mode: 'marketplace'; marketplaceName?: string; pluginNames: string[] }
-  | { mode: 'multi-plugin'; rootPaths: string[] }
+  | { mode: 'multi-plugin'; candidates: MultiPluginCandidate[] }
   | { mode: 'no-plugin' };
 
 export class PluginInstallError extends Error {
@@ -104,7 +117,26 @@ export function analysePluginTree(
   }
 
   if (pluginRoots.length > 1) {
-    return { mode: 'multi-plugin', rootPaths: pluginRoots.sort() };
+    // Parse each candidate's manifest eagerly. The inspect endpoint hands
+    // this straight back to the renderer; a single bad manifest in a
+    // 13-plugin marketplace shouldn't blow up the whole picker.
+    const sorted = pluginRoots.sort();
+    const candidates: MultiPluginCandidate[] = sorted.map(rootPath => {
+      const manifestKey = rootPath === '' ? MANIFEST_REL : `${rootPath}/${MANIFEST_REL}`;
+      const buf = tree.files.get(manifestKey);
+      if (!buf) {
+        return { rootPath, manifestError: 'plugin.json 缺失' };
+      }
+      try {
+        return { rootPath, manifest: parsePluginManifest(buf.toString('utf-8')) };
+      } catch (err) {
+        return {
+          rootPath,
+          manifestError: err instanceof Error ? err.message : 'manifest 解析失败',
+        };
+      }
+    });
+    return { mode: 'multi-plugin', candidates };
   }
 
   // Single plugin — read & validate manifest

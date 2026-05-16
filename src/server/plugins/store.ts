@@ -98,6 +98,51 @@ export interface InstallReport {
 }
 
 /**
+ * Inspect a source WITHOUT writing anything — used by the renderer's
+ * install dialog to decide "show direct install" vs "show picker for
+ * multi-plugin batch". Returns the same PluginAnalysis the install path
+ * uses internally, so the renderer can switch behaviour symmetrically.
+ *
+ * NB: this re-downloads the tarball when the user later commits to
+ * install (the install path is a separate call). For 13-plugin repos the
+ * waste is ~one extra full download — acceptable for v1; cache TTL could
+ * be added in v0.2.18 if it becomes painful.
+ */
+export async function inspectPluginSource(
+  rawInput: string,
+): Promise<import('./installer').PluginAnalysis> {
+  let source;
+  try {
+    source = resolvePluginUrl(rawInput);
+  } catch (err) {
+    if (err instanceof PluginUrlError) {
+      throw new PluginStoreError(err.message, 'INVALID_SOURCE', 400);
+    }
+    throw err;
+  }
+
+  let tree;
+  try {
+    tree = await fetchPluginTree(source);
+  } catch (err) {
+    if (err instanceof PluginFetchError) {
+      throw new PluginStoreError(err.message, 'FETCH_FAILED', err.statusCode);
+    }
+    throw err;
+  }
+
+  const subPathHint = source.kind === 'remote' ? source.subPath : undefined;
+  try {
+    return analysePluginTree(tree, subPathHint);
+  } catch (err) {
+    if (err instanceof PluginManifestError) {
+      throw new PluginStoreError(err.message, 'INVALID_MANIFEST', 422);
+    }
+    throw err;
+  }
+}
+
+/**
  * Pure orchestration:
  *   1. Resolve URL/path → ResolvedPluginSource
  *   2. Fetch → ExtractedTree
@@ -113,6 +158,14 @@ export async function installPlugin(
   rawInput: string,
   opts: {
     onProgress?: (phase: 'fetching' | 'extracting' | 'validating' | 'writing', message?: string) => void;
+    /**
+     * Optional subPath override. When the caller knows the source contains
+     * multiple plugins (multi-plugin tree) and wants to install one
+     * specific candidate, pass its rootPath here. Overrides any subPath
+     * the URL resolver derived from the input — useful for the batch
+     * install path where the renderer iterates candidates from inspect.
+     */
+    subPath?: string;
   } = {},
 ): Promise<InstallReport> {
   const { onProgress } = opts;
@@ -143,7 +196,9 @@ export async function installPlugin(
 
   // 3 — analyse
   onProgress?.('validating');
-  const subPathHint = source.kind === 'remote' ? source.subPath : undefined;
+  // Explicit opts.subPath wins over URL-derived (lets the multi-plugin
+  // batch install path target a specific rootPath without rewriting URLs).
+  const subPathHint = opts.subPath ?? (source.kind === 'remote' ? source.subPath : undefined);
   let analysis;
   try {
     analysis = analysePluginTree(tree, subPathHint);
@@ -172,7 +227,7 @@ export async function installPlugin(
   }
   if (analysis.mode === 'multi-plugin') {
     throw new PluginStoreError(
-      `检测到 ${analysis.rootPaths.length} 个插件根目录，请用 /tree/<ref>/<sub/path> 形式指向单个插件`,
+      `检测到 ${analysis.candidates.length} 个插件根目录，请用「先 inspect 再选装」流程，或传入 subPath 指向单个候选`,
       'MULTI_PLUGIN',
       422,
     );

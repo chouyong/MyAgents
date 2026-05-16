@@ -36,6 +36,44 @@ src/shared/types/plugin.ts   # PluginEntry / PluginManifest / PluginComponentInv
 
 ## 数据流
 
+### 探测（`POST /api/cc-plugin/inspect`）
+
+PRD 0.2.17 追加：用户填 URL 后**先探测、后选装**，让 marketplace 风格的多插件仓库（如 `anthropics/claude-for-legal` 13 个法律插件平铺在根目录）能一键批量导入。
+
+```
+renderer InstallDialog 输入视图 → apiPostJson('/api/cc-plugin/inspect', { sourceUrl })
+  → store.inspectPluginSource(sourceUrl)
+      → resolvePluginUrl + fetchPluginTree + analysePluginTree（不写盘）
+  → return { mode, ... }
+      ├─ mode: 'plugin'         → 自动 fallthrough 调 /install 走单装路径
+      ├─ mode: 'multi-plugin'   → 切到「选择视图」，列出每个 candidate 的
+      │                            { rootPath, manifest, manifestError? }，
+      │                            默认全选（坏 manifest 的自动剔除）
+      ├─ mode: 'marketplace'    → 友好提示「v0.2.18 支持」
+      └─ mode: 'no-plugin'      → 友好错误
+```
+
+### 批量安装（多次 `/install` + `subPath`）
+
+```
+renderer 选择视图 → 用户勾选 → 「安装 N 个」按钮
+  → 切到「正在安装」视图，串行循环：
+      for each chosen candidate:
+        apiPostJson('/api/cc-plugin/install', {
+          sourceUrl,           // 原始 URL（不变）
+          subPath: cand.rootPath,
+          installId: uuid(),
+        })
+        → 后端 installPlugin(sourceUrl, { subPath })
+            → analysePluginTree(tree, subPath) 收敛到 mode: 'plugin'
+            → 走单装路径（withConfigLock + rename atomicity）
+        → 收集 result.ok / error
+  → 全部完成后：UI 弹「成功 N 个，失败 M 个」+ 列出每条
+  → onInstalled() 刷新列表
+```
+
+**为什么串行不并行**：(1) 并发请求同名 GitHub 仓库会撞 rate limit；(2) installPlugin 的 `withConfigLock + installingNames` 防 race 假定串行调用；(3) 用户看进度条更直观。
+
 ### 安装（`POST /api/plugin/install`）
 
 ```

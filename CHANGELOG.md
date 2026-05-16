@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **设置页新增「插件 Plugins」Tab**：与技能 / 工具 MCP / 聊天机器人并列。列表显示插件名 / 版本 / 描述 / 状态（已显示/已隐藏/⚠ 异常），点开看 manifest + 组件清单（skills/agents/hooks/MCP/LSP/monitors 数量）。右上角「安装插件」弹窗支持 `owner/repo`、完整 GitHub URL、直链 `.zip`、`file:///` 本地目录四种来源。**开关只决定「在工作区里是否可见为候选」**——实际启用走下面两个新入口。
+- **多插件批量导入**：安装弹窗探测到来源包含多个插件（如 `anthropics/claude-for-legal` 13 个法律插件在仓库根目录平铺）时，自动切换到「选择视图」列出所有候选 + manifest 元数据 + 默认全选（坏 manifest 自动剔除）。用户勾选后串行批量安装，进度条 + 每条 ✓/✗ 状态。失败的不影响其它继续装。
 - **Chat 输入框「工具」菜单新增「插件 Plugins」子菜单**：与已有的 MCP 列表同级。列出所有 Settings 已显示的插件，每个一个 toggle。勾选后该插件**对当前工作区**生效（写入 Agent 配置 + 推送给 sidecar 立即生效）。如果插件自带 MCP server，副标题会标示「🔌 N 个 MCP: foo, bar」让用户知道启用后会自动加载哪些工具。
 - **Agent 设置面板（基础设置 → 工具）新增「插件 Plugins」一行**：复用 MCP 工具卡片样式（多选 checkbox），写入 `Agent.enabledPluginIds`。与 Chat 输入框的子菜单是**同一份持久化状态**，两个 UI surface 任改一个，另一个同步显示。
 - **CLI `myagents cc-plugin` 子命令族**：`list / install / uninstall / enable / disable / show`。区别于已有的 `myagents plugin`（OpenClaw IM 渠道插件），`cc-plugin` 专管 Claude 协议插件。`myagents cc-plugin install anthropics/example-plugin` 一键装，`myagents cc-plugin disable foo` 立即禁用。
