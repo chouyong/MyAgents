@@ -11,12 +11,6 @@ export function normalizeChannelId() { _w('normalizeChannelId'); return ""; }
 export function enqueueSystemEvent() { _w('enqueueSystemEvent'); return undefined; }
 export function resetSystemEventsForTest() { _w('resetSystemEventsForTest'); return undefined; }
 export function recordChannelActivity() { _w('recordChannelActivity'); return undefined; }
-export function createAccountStatusSink() { _w('createAccountStatusSink'); return undefined; }
-export function normalizeChatType() { _w('normalizeChatType'); return ""; }
-export function createReplyPrefixContext() { _w('createReplyPrefixContext'); return undefined; }
-export function createTypingCallbacks() { _w('createTypingCallbacks'); return undefined; }
-export function reduceInteractiveReply() { _w('reduceInteractiveReply'); return undefined; }
-export function resolvePollMaxSelections() { _w('resolvePollMaxSelections'); return undefined; }
 export function resolveIndicatorType() { _w('resolveIndicatorType'); return undefined; }
 export function emitHeartbeatEvent() { _w('emitHeartbeatEvent'); return undefined; }
 export function onHeartbeatEvent() { _w('onHeartbeatEvent'); return undefined; }

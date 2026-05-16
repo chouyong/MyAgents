@@ -9,7 +9,8 @@ function _w(fn) {
 
 export function implicitMentionKindWhen() { _w('implicitMentionKindWhen'); return undefined; }
 export function resolveInboundMentionDecision() { _w('resolveInboundMentionDecision'); return undefined; }
-export function policy() { _w('policy'); return undefined; }
+export function resolveMentionGating() { _w('resolveMentionGating'); return undefined; }
+export function resolveMentionGatingWithBypass() { _w('resolveMentionGatingWithBypass'); return undefined; }
 export const CURRENT_MESSAGE_MARKER = undefined;
 export function buildMentionRegexes() { _w('buildMentionRegexes'); return undefined; }
 export function normalizeMentionText() { _w('normalizeMentionText'); return ""; }

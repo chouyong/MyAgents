@@ -22,7 +22,8 @@ export function createChannelInboundDebouncer() { _w('createChannelInboundDeboun
 export function shouldDebounceTextInbound() { _w('shouldDebounceTextInbound'); return false; }
 export function implicitMentionKindWhen() { _w('implicitMentionKindWhen'); return undefined; }
 export function resolveInboundMentionDecision() { _w('resolveInboundMentionDecision'); return undefined; }
-export function policy() { _w('policy'); return undefined; }
+export function resolveMentionGating() { _w('resolveMentionGating'); return undefined; }
+export function resolveMentionGatingWithBypass() { _w('resolveMentionGatingWithBypass'); return undefined; }
 export function formatLocationText() { _w('formatLocationText'); return ""; }
 export function toLocationContext() { _w('toLocationContext'); return undefined; }
 export function logInboundDrop() { _w('logInboundDrop'); return undefined; }

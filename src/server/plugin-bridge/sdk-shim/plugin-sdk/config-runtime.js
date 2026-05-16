@@ -16,10 +16,10 @@ export function clearRuntimeConfigSnapshot() { _w('clearRuntimeConfigSnapshot');
 export function getRuntimeConfigSourceSnapshot() { _w('getRuntimeConfigSourceSnapshot'); return undefined; }
 export function getRuntimeConfigSnapshot() { _w('getRuntimeConfigSnapshot'); return undefined; }
 export function getRuntimeConfig() { _w('getRuntimeConfig'); return undefined; }
-export function runtime() { _w('runtime'); return undefined; }
-export function or() { _w('or'); return undefined; }
+export function loadConfig() { _w('loadConfig'); return undefined; }
 export function readConfigFileSnapshotForWrite() { _w('readConfigFileSnapshotForWrite'); return undefined; }
 export function setRuntimeConfigSnapshot() { _w('setRuntimeConfigSnapshot'); return undefined; }
+export function writeConfigFile() { _w('writeConfigFile'); return undefined; }
 export function mutateConfigFile() { _w('mutateConfigFile'); return undefined; }
 export function replaceConfigFile() { _w('replaceConfigFile'); return undefined; }
 export function logConfigUpdated() { _w('logConfigUpdated'); return undefined; }

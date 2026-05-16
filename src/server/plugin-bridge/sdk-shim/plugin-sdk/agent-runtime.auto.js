@@ -72,7 +72,6 @@ export function resolveUserTimeFormat() { _w('resolveUserTimeFormat'); return un
 export function normalizeTimestamp() { _w('normalizeTimestamp'); return ""; }
 export function withNormalizedTimestamp() { _w('withNormalizedTimestamp'); return undefined; }
 export function formatUserTime() { _w('formatUserTime'); return ""; }
-export const DEFAULT_PROVIDER = undefined;
 export function resolvePublicAgentAvatarSource() { _w('resolvePublicAgentAvatarSource'); return undefined; }
 export function resolveAgentAvatar() { _w('resolveAgentAvatar'); return undefined; }
 export function resolveAgentIdentity() { _w('resolveAgentIdentity'); return undefined; }
@@ -145,7 +144,6 @@ export function legacyModelKey() { _w('legacyModelKey'); return undefined; }
 export function modelKey() { _w('modelKey'); return undefined; }
 export function normalizeModelRef() { _w('normalizeModelRef'); return ""; }
 export function normalizeModelSelection() { _w('normalizeModelSelection'); return ""; }
-export function normalizeProviderId() { _w('normalizeProviderId'); return ""; }
 export function normalizeProviderIdForAuth() { _w('normalizeProviderIdForAuth'); return ""; }
 export function parseModelRef() { _w('parseModelRef'); return undefined; }
 export function resolveBareModelDefaultProvider() { _w('resolveBareModelDefaultProvider'); return undefined; }
@@ -191,7 +189,6 @@ export async function imageResultFromFile() { _w('imageResultFromFile'); return 
 export function asToolParamsRecord() { _w('asToolParamsRecord'); return undefined; }
 export function readReactionParams() { _w('readReactionParams'); return undefined; }
 export function parseAvailableTags() { _w('parseAvailableTags'); return undefined; }
-export const OWNER_ONLY_TOOL_ERROR = undefined;
 export async function fetchWithWebToolsNetworkGuard() { _w('fetchWithWebToolsNetworkGuard'); return undefined; }
 export async function withTrustedWebToolsEndpoint() { _w('withTrustedWebToolsEndpoint'); return undefined; }
 export async function withStrictWebToolsEndpoint() { _w('withStrictWebToolsEndpoint'); return undefined; }

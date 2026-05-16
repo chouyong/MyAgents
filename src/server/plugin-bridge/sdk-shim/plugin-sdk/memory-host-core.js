@@ -31,4 +31,3 @@ export function registerMemoryCapability() { _w('registerMemoryCapability'); ret
 export function registerMemoryCorpusSupplement() { _w('registerMemoryCorpusSupplement'); return undefined; }
 export function parseAgentSessionKey() { _w('parseAgentSessionKey'); return undefined; }
 export const SILENT_REPLY_TOKEN = undefined;
-export function or() { _w('or'); return undefined; }

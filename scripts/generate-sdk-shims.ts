@@ -142,6 +142,105 @@ function resolveImportPath(
 }
 
 /**
+ * Find every `export { ... }` and `export type { ... }` block in TS/JS
+ * source. Returns the body (between the braces) with comments stripped,
+ * plus an `isTypeOnly` flag so callers can skip type-only blocks.
+ *
+ * Hand-rolled rather than regex because the prior regex
+ * `^export\s+\{([^}]+)\}/gm` was wrong: `[^}]+` stops at the FIRST `}`,
+ * including ones that live inside `//` line comments and `/* * /` block
+ * comments inside the export list. Upstream openclaw's channel-inbound.ts
+ * has:
+ *
+ *   export {
+ *     // @deprecated Prefer `resolveInboundMentionDecision({ facts, policy })`.
+ *     resolveMentionGatingWithBypass,
+ *   } from "...";
+ *
+ * The regex matched up to the `}` after `policy` and synthesized a fake
+ * `policy` export from the comment text, while silently dropping
+ * `resolveMentionGatingWithBypass`. yuanbao v2.13.2 then failed ESM link
+ * with "does not provide an export named 'resolveMentionGatingWithBypass'"
+ * (issue #202). The same trap fires for channel-mention-gating.ts and
+ * config-runtime.ts; a future deprecation comment with `}` inside any
+ * export block would silently break shim generation again.
+ *
+ * The scanner: locate `^export(\s+type)?\s+\{`, then walk forward
+ * tracking depth, skipping comment regions and string literals so braces
+ * inside them don't count. Return the body with comments stripped so a
+ * downstream split on `,` produces clean identifier candidates.
+ */
+function findNamedExportBlocks(
+  src: string,
+): Array<{ body: string; isTypeOnly: boolean }> {
+  const blocks: Array<{ body: string; isTypeOnly: boolean }> = [];
+  const headRe = /^export(\s+type)?\s+\{/gm;
+  let m: RegExpExecArray | null;
+  while ((m = headRe.exec(src)) !== null) {
+    const isTypeOnly = !!m[1];
+    const bodyStart = headRe.lastIndex; // index after the opening `{`
+    let i = bodyStart;
+    let depth = 1;
+    while (i < src.length && depth > 0) {
+      const c = src[i];
+      const n = src[i + 1];
+      // // line comment → skip to end of line
+      if (c === "/" && n === "/") {
+        const nl = src.indexOf("\n", i);
+        i = nl === -1 ? src.length : nl + 1;
+        continue;
+      }
+      // /* block comment */ → skip to */
+      if (c === "/" && n === "*") {
+        const end = src.indexOf("*/", i + 2);
+        i = end === -1 ? src.length : end + 2;
+        continue;
+      }
+      // string / template literal → skip past matching quote
+      if (c === '"' || c === "'" || c === "`") {
+        const quote = c;
+        i++;
+        while (i < src.length) {
+          if (src[i] === "\\") {
+            i += 2;
+            continue;
+          }
+          if (src[i] === quote) {
+            i++;
+            break;
+          }
+          i++;
+        }
+        continue;
+      }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          const body = src
+            .slice(bodyStart, i)
+            // belt-and-suspenders: also strip comments from the captured
+            // body so the downstream `split(",")` doesn't see fragments
+            // like `// @deprecated Prefer (` as an identifier
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/\/\/.*$/gm, "");
+          blocks.push({ body, isTypeOnly });
+          // advance headRe past the closing brace before continuing
+          headRe.lastIndex = i + 1;
+          break;
+        }
+      }
+      i++;
+    }
+    // If we walked off the end without closing (malformed source), drop
+    // this block and end the loop — there are no further `export {` heads
+    // to find past EOF.
+    if (depth > 0) headRe.lastIndex = src.length;
+  }
+  return blocks;
+}
+
+/**
  * Extract all value (non-type) exported symbols from a TypeScript file.
  * Recursively follows `export * from` up to maxDepth.
  */
@@ -200,24 +299,15 @@ function extractExports(filePath: string, depth: number = 0): ExportSymbol[] {
 
   // --- Named exports: export { A, B } from "..." AND local export { A, B };
   // Must skip type-only: export type { A } from "..." / export type { A };
-  // And skip individual `type X` within mixed export blocks
-
-  // Match both re-exports and local exports:
-  //   export { foo, bar } from "...";
-  //   export { foo, bar };
-  const namedExportRe =
-    /^export\s+\{([^}]+)\}/gm;
-
-  for (const m of content.matchAll(namedExportRe)) {
-    // Check the full match doesn't start with `export type {`
-    const fullLine = content.slice(
-      Math.max(0, (m.index ?? 0) - 5),
-      (m.index ?? 0) + m[0].length,
-    );
-    if (/export\s+type\s+\{/.test(fullLine)) continue;
-
-    const namesBlock = m[1];
-    for (const part of namesBlock.split(",")) {
+  // And skip individual `type X` within mixed export blocks.
+  //
+  // Use a comment/string-aware brace matcher rather than a `[^}]+` regex —
+  // see findNamedExportBlocks() for the bug #202 history (JSDoc `}` inside
+  // a deprecation comment truncated the export block and synthesized a
+  // bogus `policy` export, breaking yuanbao plugin load).
+  for (const block of findNamedExportBlocks(content)) {
+    if (block.isTypeOnly) continue;
+    for (const part of block.body.split(",")) {
       const trimmed = part.trim();
       if (!trimmed) continue;
 
@@ -314,10 +404,12 @@ function extractHandwrittenExports(
     names.add(m[1]);
   }
   // export { A, B } / export { A, B } from "..."
-  for (const m of src.matchAll(/^export\s+\{([^}]+)\}/gm)) {
-    const before = src.slice(Math.max(0, (m.index ?? 0) - 5), m.index ?? 0);
-    if (/type\s*$/.test(before)) continue;
-    for (const part of m[1].split(",")) {
+  // Comment/string-aware brace matcher — see findNamedExportBlocks() for
+  // why a regex won't do (bug #202: JSDoc with `}` inside the export block
+  // truncated the parse).
+  for (const block of findNamedExportBlocks(src)) {
+    if (block.isTypeOnly) continue;
+    for (const part of block.body.split(",")) {
       const t = part.trim();
       if (!t || /^type\s+/.test(t)) continue;
       const asMatch = t.match(/(\w+)\s+as\s+(\w+)/);
