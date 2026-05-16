@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -24,6 +24,9 @@ import ModelManagementPanel from '@/components/ModelManagementPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getEffectiveModelAliases,
+    normalizeDisabledProviderIds,
+    normalizeProviderOrder,
+    type AppConfig,
     type ModelAliases,
     type Provider,
     type ProviderAuthType,
@@ -49,6 +52,7 @@ import {
     getMcpServerEnv,
     atomicModifyConfig,
     isProviderAvailable,
+    rebuildAndPersistAvailableProviders,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
@@ -70,6 +74,7 @@ import BugReportOverlay from '@/components/BugReportOverlay';
 import SettingsHelperInbox from '@/components/SettingsHelperInbox';
 import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
+import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
 function parsePositiveInt(value: string): number | undefined {
@@ -320,6 +325,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     const [showCustomForm, setShowCustomForm] = useState(false);
     const [customForm, setCustomForm] = useState<CustomProviderForm>(EMPTY_CUSTOM_FORM);
+    const [showProviderOrderDialog, setShowProviderOrderDialog] = useState(false);
+    const [providerOrderDraft, setProviderOrderDraft] = useState<string[]>([]);
+    const [disabledProviderDraft, setDisabledProviderDraft] = useState<string[]>([]);
     const customModelInputRef = useRef<HTMLInputElement>(null);
     const addCustomModelFromInput = () => {
         const val = customModelInputRef.current?.value.trim();
@@ -709,6 +717,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // z-50: all other inline overlays
         if (runtimeDialog.show) { setRuntimeDialog(prev => ({ ...prev, show: false })); return true; }
         if (editingProvider) { setEditingProvider(null); return true; }
+        if (showProviderOrderDialog) { setShowProviderOrderDialog(false); return true; }
         if (showCustomForm) { setShowCustomForm(false); return true; }
         if (showMcpForm) { setShowMcpForm(false); setEditingMcpId(null); return true; }
         if (builtinMcpSettings) { setBuiltinMcpSettings(null); return true; }
@@ -2083,6 +2092,41 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // providers from useConfig includes both preset and custom providers
     const allProviders = providers;
+    const visibleProviders = useMemo(
+        () => providers.filter(provider => provider.enabled !== false),
+        [providers],
+    );
+
+    const openProviderOrderDialog = useCallback(() => {
+        setProviderOrderDraft(allProviders.map(provider => provider.id));
+        setDisabledProviderDraft(allProviders
+            .filter(provider => provider.enabled === false)
+            .map(provider => provider.id));
+        setShowProviderOrderDialog(true);
+    }, [allProviders]);
+
+    const saveProviderOrderSettings = useCallback(async () => {
+        const providerIds = allProviders.map(provider => provider.id);
+        const nextOrder = normalizeProviderOrder(providerIds, providerOrderDraft);
+        const nextDisabled = normalizeDisabledProviderIds(providerIds, disabledProviderDraft);
+        const updates: Partial<AppConfig> = {
+            providerOrder: nextOrder,
+            disabledProviderIds: nextDisabled.length > 0 ? nextDisabled : undefined,
+        };
+        if (config.defaultProviderId && nextDisabled.includes(config.defaultProviderId)) {
+            updates.defaultProviderId = undefined;
+        }
+
+        try {
+            await updateConfig(updates);
+            await rebuildAndPersistAvailableProviders();
+            setShowProviderOrderDialog(false);
+            toast.success('供应商启用和排序已保存');
+        } catch (error) {
+            console.error('[Settings] Failed to save provider order settings:', error);
+            toast.error('保存供应商启用和排序失败');
+        }
+    }, [allProviders, config.defaultProviderId, disabledProviderDraft, providerOrderDraft, toast, updateConfig]);
 
     // Refs for API Key expiry check (P2 fix - avoid stale closures)
     const allProvidersRef = useRef(allProviders);
@@ -2097,6 +2141,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // Delay to let component stabilize
         const timer = setTimeout(() => {
             allProvidersRef.current.forEach((provider: Provider) => {
+                if (provider.enabled === false) return;
                 // Skip subscription type (handled separately)
                 if (provider.type === 'subscription') return;
 
@@ -2377,13 +2422,22 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         )}
                         <div className="mb-8 flex items-center justify-between">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">模型供应商</h2>
-                            <button
-                                onClick={() => setShowCustomForm(true)}
-                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-                            >
-                                <Plus className="h-3.5 w-3.5" />
-                                添加
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={openProviderOrderDialog}
+                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                                    启用和排序
+                                </button>
+                                <button
+                                    onClick={() => setShowCustomForm(true)}
+                                    className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                    添加供应商
+                                </button>
+                            </div>
                         </div>
 
                         <p className="mb-6 text-sm text-[var(--ink-muted)]">
@@ -2392,7 +2446,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                         {/* Provider list */}
                         <div className="grid grid-cols-2 gap-4">
-                            {allProviders.map((provider) => (
+                            {visibleProviders.map((provider) => (
                                 <div
                                     key={provider.id}
                                     className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
@@ -2529,6 +2583,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     )}
                                 </div>
                             ))}
+                            {visibleProviders.length === 0 && (
+                                <div className="col-span-2 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-8 text-center">
+                                    <p className="text-sm font-medium text-[var(--ink)]">没有已启用的供应商</p>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">打开“启用和排序”重新启用供应商。</p>
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}
@@ -5049,6 +5109,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         )}
                     </div>
                 </OverlayBackdrop>
+            )}
+
+            {/* Provider Enablement / Ordering Modal */}
+            {showProviderOrderDialog && (
+                <ProviderEnableOrderDialog
+                    providers={allProviders}
+                    providerOrderDraft={providerOrderDraft}
+                    disabledProviderDraft={disabledProviderDraft}
+                    onProviderOrderDraftChange={setProviderOrderDraft}
+                    onDisabledProviderDraftChange={setDisabledProviderDraft}
+                    onClose={() => setShowProviderOrderDialog(false)}
+                    onSave={saveProviderOrderSettings}
+                />
             )}
 
             {/* Custom Provider Modal */}

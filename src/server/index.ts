@@ -541,7 +541,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, resolveProviderEnv } from './utils/admin-config';
+import { findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
@@ -691,6 +691,11 @@ function resolveCronProviderRouting(
   if (!provider) {
     throw new Error(
       `Provider '${providerId}' not found in config — task references a provider that has been deleted. Re-select a provider in 任务编辑 → 高级配置.`,
+    );
+  }
+  if (isProviderDisabled(providerId)) {
+    throw new Error(
+      `Provider '${providerId}' is disabled — re-enable it in 设置 → 模型供应商 → 启用和排序, or re-select a provider in 任务编辑 → 高级配置.`,
     );
   }
   if (provider.type === 'subscription') {

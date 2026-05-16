@@ -11,6 +11,7 @@ import {
     type Provider,
     type ProviderVerifyStatus,
     PRESET_PROVIDERS,
+    applyProviderEnablementAndOrder,
 } from './types';
 import {
     loadAppConfig,
@@ -150,16 +151,30 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     // Derived: merge preset custom models + apply user primary model overrides
     const providers = useMemo(() => {
         const merged = mergePresetCustomModels(rawProviders, config.presetCustomModels, config.presetRemovedModels);
+        const providerOrderSettings = {
+            providerOrder: config.providerOrder,
+            disabledProviderIds: config.disabledProviderIds,
+        };
         const overrides = config.providerPrimaryModels;
-        if (!overrides || Object.keys(overrides).length === 0) return merged;
+        if (!overrides || Object.keys(overrides).length === 0) {
+            return applyProviderEnablementAndOrder(merged, providerOrderSettings);
+        }
         // Apply user's primaryModel override directly on the Provider object
         // so ALL consumers see the correct value without needing getEffectivePrimaryModel()
-        return merged.map(p => {
+        const withPrimaryOverrides = merged.map(p => {
             const userPrimary = overrides[p.id];
             if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
             return { ...p, primaryModel: userPrimary };
         });
-    }, [rawProviders, config.presetCustomModels, config.presetRemovedModels, config.providerPrimaryModels]);
+        return applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings);
+    }, [
+        rawProviders,
+        config.presetCustomModels,
+        config.presetRemovedModels,
+        config.providerPrimaryModels,
+        config.providerOrder,
+        config.disabledProviderIds,
+    ]);
 
     // Mount guard
     const isMountedRef = useRef(true);

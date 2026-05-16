@@ -75,6 +75,75 @@ export interface ModelAliases {
   haiku?: string;   // e.g., 'deepseek-chat'
 }
 
+export interface ProviderOrderSettings {
+  providerOrder?: string[];
+  disabledProviderIds?: string[];
+}
+
+type ProviderOrderable = {
+  id: string;
+  enabled?: unknown;
+};
+
+export function normalizeProviderOrder(providerIds: string[], providerOrder?: string[]): string[] {
+  const known = new Set(providerIds);
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+
+  for (const id of providerOrder ?? []) {
+    if (!known.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    ordered.push(id);
+  }
+
+  for (const id of providerIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ordered.push(id);
+  }
+
+  return ordered;
+}
+
+export function normalizeDisabledProviderIds(providerIds: string[], disabledProviderIds?: string[]): string[] {
+  const known = new Set(providerIds);
+  const seen = new Set<string>();
+  const disabled: string[] = [];
+
+  for (const id of disabledProviderIds ?? []) {
+    if (!known.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    disabled.push(id);
+  }
+
+  return disabled;
+}
+
+export function applyProviderEnablementAndOrder<T extends ProviderOrderable>(
+  providers: T[],
+  settings?: ProviderOrderSettings,
+): T[] {
+  const byId = new Map(providers.map(provider => [provider.id, provider] as const));
+  const orderedIds = normalizeProviderOrder(providers.map(provider => provider.id), settings?.providerOrder);
+  const disabled = new Set(normalizeDisabledProviderIds(orderedIds, settings?.disabledProviderIds));
+
+  return orderedIds
+    .map(id => {
+      const provider = byId.get(id);
+      if (!provider) return undefined;
+      const nextEnabled = !disabled.has(id);
+      if (provider.enabled === nextEnabled || (nextEnabled && provider.enabled === undefined)) {
+        return provider;
+      }
+      return { ...provider, enabled: nextEnabled };
+    })
+    .filter((provider): provider is T => Boolean(provider));
+}
+
+export function isProviderEnabled(provider: { enabled?: unknown } | null | undefined): boolean {
+  return provider?.enabled !== false;
+}
+
 /**
  * Get the display name for a model
  */
@@ -141,6 +210,7 @@ export interface Provider {
   type: 'subscription' | 'api';
   primaryModel: string;     // 默认模型 API 代码
   isBuiltin: boolean;
+  enabled?: boolean;        // Runtime-derived: false when globally disabled by the user
 
   // API 配置
   config: {
@@ -361,6 +431,12 @@ export interface AppConfig {
   // ===== Provider Model Aliases (user overrides) =====
   // Maps provider ID → user-configured model alias overrides (merged with preset defaults)
   providerModelAliases?: Record<string, ModelAliases>;
+
+  // ===== Provider Enablement / Ordering =====
+  // Provider IDs in user-defined display/fallback order.
+  providerOrder?: string[];
+  // Provider IDs hidden from selectors and runtime resolution without deleting their settings.
+  disabledProviderIds?: string[];
 
   // ===== MCP Configuration =====
   // Custom MCP servers added by user (merged with presets)

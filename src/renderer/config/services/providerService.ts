@@ -3,7 +3,7 @@ import { exists, readDir, readTextFile, remove } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
 import type { Provider, ProviderVerifyStatus, AppConfig, Project } from '../types';
-import { PRESET_PROVIDERS } from '../types';
+import { PRESET_PROVIDERS, applyProviderEnablementAndOrder, isProviderEnabled } from '../types';
 import type { AgentConfig } from '../../../shared/types/agent';
 import {
     isBrowserDevMode,
@@ -208,7 +208,14 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
         ]);
         const verifyStatus = config.providerVerifyStatus ?? {};
 
-        const mergedProviders = mergePresetCustomModels(allProviders, config.presetCustomModels, config.presetRemovedModels as Record<string, string[]> | undefined);
+        const mergedProviders = applyProviderEnablementAndOrder(
+            mergePresetCustomModels(
+                allProviders,
+                config.presetCustomModels,
+                config.presetRemovedModels as Record<string, string[]> | undefined,
+            ),
+            config,
+        );
         // Apply user primary model overrides
         const primaryOverrides = config.providerPrimaryModels as Record<string, string> | undefined;
         // Only include providers with valid credentials:
@@ -253,6 +260,7 @@ export function isProviderAvailable(
     apiKeys: Record<string, string>,
     verifyStatus: Record<string, ProviderVerifyStatus>,
 ): boolean {
+    if (!isProviderEnabled(provider)) return false;
     if (provider.type === 'subscription') {
         const result = verifyStatus[provider.id];
         return result?.status === 'valid' && !!result?.accountEmail;
