@@ -653,9 +653,41 @@ export class GeminiRuntime implements AgentRuntime {
         // Fall through to spawn-temporary fallback if the prewarm RPC died.
       }
     }
-    // 3. No prewarm in flight (e.g. Launcher's Global Sidecar query) — spawn
-    //    a temporary process. queryModelsViaAcp writes modelCache itself before
-    //    returning, so subsequent calls within the TTL skip this branch.
+    // 3. Tab-Sidecar race window — `06e7f82a` follow-up. queryModels and
+    //    prewarm both fire on Tab boot (within ~200ms of each other). The
+    //    original 06e7f82a fix made the share work for the prewarm-first
+    //    ordering, but when queryModels arrives FIRST (also common — depends
+    //    on React render order) we used to fall through to step 4 and spawn a
+    //    duplicate `gemini --acp`. Verified in unified-2026-05-16.log at
+    //    14:38:49 — `[gemini-stderr/queryModels]` tag confirmed a separate
+    //    process spawned alongside prewarm's.
+    //
+    //    Poll briefly here so the late prewarm can claim
+    //    `currentSessionNewPromise` and we share its result. Bounded so the
+    //    Global Sidecar / Launcher path (no prewarm coming) only pays a short
+    //    extra latency on its model-list fetch — which is non-blocking UI.
+    //
+    //    Async polling, not busy-wait: CLAUDE.md red-line `Atomics.wait` is
+    //    about sync spin loops; this yields back to the event loop every
+    //    iteration and is identical in shape to the `previewReqIdRef` async
+    //    polling already used in DirectoryPanel.
+    const RACE_DEADLINE_MS = 500;
+    const POLL_INTERVAL_MS = 50;
+    const deadline = Date.now() + RACE_DEADLINE_MS;
+    while (Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+      if (this.currentSessionNewPromise) {
+        try {
+          return await this.currentSessionNewPromise;
+        } catch {
+          break; // Fall through to step 4
+        }
+      }
+    }
+    // 4. No prewarm arrived (Global Sidecar / Launcher path, or prewarm RPC
+    //    died in step 2 / 3). Spawn a temporary process. queryModelsViaAcp
+    //    writes modelCache itself before returning, so subsequent calls
+    //    within the TTL skip this branch.
     try {
       return await this.queryModelsViaAcp();
     } catch (err) {
