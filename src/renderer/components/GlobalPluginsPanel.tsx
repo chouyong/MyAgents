@@ -252,9 +252,9 @@ export default function GlobalPluginsPanel({
       </div>
 
       <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
-        Claude 插件（skills + agents + hooks + MCP）— 来自 GitHub 或本地目录。
-        这里的开关决定插件「<b className="text-[var(--ink-secondary)]">在各工作区是否可见</b>」；要实际启用，请去 Agent 设置或 Chat 输入框 ➜ 工具 ➜ 插件子菜单里勾选。
-        仅作用于 MyAgents 自带 Runtime；外部 Runtime 请在该 CLI 内用 <code className="font-mono text-[12px]">/plugin</code> 管理。
+        MyAgents 支持 Claude Plugins 插件协议，每个插件内可能包含 skills + sub agents + hooks + MCP。
+        右侧「安装插件」按钮，支持通过 Github 链接或本地文件夹来安装插件。
+        插件开关决定插件「<b className="text-[var(--ink-secondary)]">在各工作区是否可见</b>」；如果要实际启用，请去 Agent 设置或 Chat 输入框 ➜ 工具菜单里勾选启用。
       </p>
 
       {loading ? (
@@ -932,7 +932,7 @@ function InputView({
       <div className="border-b border-[var(--line)] px-5 py-4">
         <h2 className="text-[15px] font-semibold text-[var(--ink)]">安装插件</h2>
         <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
-          支持：GitHub 仓库（<code className="text-[11px]">owner/repo</code> 或完整 URL）、直链 zip、<code className="text-[11px]">file:///</code> 本地目录
+          支持：GitHub 仓库（<code className="text-[11px]">owner/repo</code>、<code className="text-[11px]">github.com/...</code> 或完整 URL）、直链 <code className="text-[11px]">.zip</code>、本地文件夹绝对路径（如 <code className="text-[11px]">/Users/me/dev/plugin</code> 或 <code className="text-[11px]">C:\dev\plugin</code>）
         </p>
       </div>
 
@@ -944,7 +944,7 @@ function InputView({
             value={sourceUrl}
             onChange={(e) => setSourceUrl(e.target.value)}
             disabled={submitting}
-            placeholder="anthropics/example-plugin 或 https://github.com/... 或 file:///..."
+            placeholder="anthropics/example-plugin · github.com/... · /Users/me/plugin · C:\dev\plugin"
             className="mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[13px] text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40 disabled:opacity-60"
             autoFocus
             onKeyDown={(e) => {

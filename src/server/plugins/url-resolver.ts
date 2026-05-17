@@ -85,6 +85,8 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
       sourceUrl: trimmed,
     };
   }
+  // POSIX-style absolute path (/Users/..., /home/...). `isAbsolute` on
+  // POSIX runtimes accepts /; on Windows it accepts both / and \.
   if (isAbsolute(trimmed) && !trimmed.startsWith('http')) {
     if (trimmed.split('/').some(seg => seg === '..')) {
       throw new PluginUrlError(`路径含非法 .. 段：${trimmed}`);
@@ -94,6 +96,22 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
       displayName: trimmed,
       absolutePath: resolvePath(trimmed),
       sourceUrl: `file://${trimmed}`,
+    };
+  }
+  // Windows-style absolute path (C:\foo, D:/bar). `isAbsolute` running on
+  // macOS/Linux dev returns false for these even though Windows users
+  // would type them — explicit drive-letter detection lets the same
+  // sidecar build accept both forms.
+  if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
+    // Reject `..` segments in either separator before any disk touch.
+    if (/(^|[\\/])\.\.([\\/]|$)/.test(trimmed)) {
+      throw new PluginUrlError(`路径含非法 .. 段：${trimmed}`);
+    }
+    return {
+      kind: 'local',
+      displayName: trimmed,
+      absolutePath: resolvePath(trimmed),
+      sourceUrl: `file:///${trimmed.replace(/\\/g, '/')}`,
     };
   }
 
@@ -123,7 +141,18 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
   }
 
   // ---------------------------------------------------------------- Full GitHub URL
-  const fullMatch = trimmed.match(
+  // Accept all four common copy-paste forms, normalizing missing scheme
+  // and bare `github.com/...` / `www.github.com/...` to the canonical
+  // https form before matching:
+  //   https://github.com/owner/repo
+  //   https://www.github.com/owner/repo
+  //          github.com/owner/repo        ← bare host (very common copy)
+  //          www.github.com/owner/repo    ← rare but trivially handled
+  const githubBareMatch = trimmed.match(/^(?:www\.)?github\.com\/(.+)$/i);
+  const githubishUrl = githubBareMatch
+    ? `https://github.com/${githubBareMatch[1]}`
+    : trimmed;
+  const fullMatch = githubishUrl.match(
     /^https?:\/\/(?:www\.)?github\.com\/([^/\s#?]+)\/([^/\s#?]+?)(?:\.git)?(?:\/tree\/([^/\s#?]+)((?:\/[^\s#?]+)?))?\/?(?:[?#].*)?$/i,
   );
   if (fullMatch) {
