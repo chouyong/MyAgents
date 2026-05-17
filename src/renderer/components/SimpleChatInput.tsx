@@ -2128,10 +2128,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 placement="top-start"
                 // max-h + overflow-y-auto so a workspace with 13+ enabled
                 // plugins (anthropics/claude-for-legal etc.) doesn't blow
-                // past the viewport top. 45vh shows ~6 rows on a 13"
-                // laptop and leaves visible breathing room above the
-                // popover so the user keeps spatial context.
-                className="w-64 max-h-[45vh] overflow-y-auto py-1"
+                // past the viewport top. 50vh shows ~6 full rows AND
+                // half-clips the next one — the partial row is the
+                // affordance that tells the user "scroll for more".
+                className="w-64 max-h-[50vh] overflow-y-auto py-1"
               >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)
@@ -2211,66 +2211,85 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                      *  the globallyVisiblePlugins prop). Toggling calls
                      *  onWorkspacePluginToggle which writes to the Agent +
                      *  pushes a session override to the sidecar. */}
-                    {globallyVisiblePlugins.length > 0 && (
-                      <>
-                        <div className="px-3 py-2 mt-1 text-xs font-medium text-[var(--ink-muted)] border-t border-[var(--line)] border-b border-[var(--line)] bg-[var(--paper-inset)]/40">
-                          插件 Plugins
-                        </div>
-                        {globallyVisiblePlugins.map((plugin) => {
-                          const isEnabled = workspaceEnabledPlugins.includes(plugin.id);
-                          return (
-                            <div
-                              key={plugin.id}
-                              className="flex items-center justify-between px-3 py-2"
-                            >
-                              <div className="flex-1 min-w-0">
-                                <div className="text-sm font-medium text-[var(--ink)] truncate">
-                                  {plugin.name}
-                                </div>
-                                {plugin.description && (
-                                  <div className="text-xs text-[var(--ink-muted)] truncate">
-                                    {plugin.description}
-                                  </div>
-                                )}
-                                {plugin.mcpServerNames && plugin.mcpServerNames.length > 0 && (
-                                  <div
-                                    className="mt-0.5 text-[11px] text-[var(--ink-muted)] truncate"
-                                    title={`启用此插件会自动加载这些 MCP server：${plugin.mcpServerNames.join(', ')}`}
-                                  >
-                                    🔌 {plugin.mcpServerNames.length} 个 MCP：{plugin.mcpServerNames.join(', ')}
-                                  </div>
-                                )}
+                    {/* Plugin section header always renders (even when zero
+                     *  plugins installed) so the feature is discoverable —
+                     *  the empty-state hint doubles as onboarding pointing
+                     *  to Settings → Plugins. Matches the MCP empty-state
+                     *  pattern above for visual symmetry. */}
+                    <div className="px-3 py-2 mt-1 text-xs font-medium text-[var(--ink-muted)] border-t border-[var(--line)] border-b border-[var(--line)] bg-[var(--paper-inset)]/40">
+                      插件 Plugins
+                    </div>
+                    {globallyVisiblePlugins.length > 0 ? (
+                      globallyVisiblePlugins.map((plugin) => {
+                        const isEnabled = workspaceEnabledPlugins.includes(plugin.id);
+                        return (
+                          <div
+                            key={plugin.id}
+                            className="flex items-center justify-between px-3 py-2"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium text-[var(--ink)] truncate">
+                                {plugin.name}
                               </div>
-                              <button
-                                type="button"
-                                title="管理插件"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setShowToolMenu(false);
-                                  window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: 'plugins' } }));
-                                }}
-                                className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                              >
-                                <Settings2 className="h-3.5 w-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onWorkspacePluginToggle?.(plugin.id, !isEnabled);
-                                }}
-                                className={`relative ml-2 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors hover:opacity-80 focus:outline-none ${isEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
-                                  }`}
-                              >
-                                <span
-                                  className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
-                                    }`}
-                                />
-                              </button>
+                              {plugin.description && (
+                                <div className="text-xs text-[var(--ink-muted)] truncate">
+                                  {plugin.description}
+                                </div>
+                              )}
+                              {plugin.mcpServerNames && plugin.mcpServerNames.length > 0 && (
+                                <div
+                                  className="mt-0.5 text-[11px] text-[var(--ink-muted)] truncate"
+                                  title={`启用此插件会自动加载这些 MCP server：${plugin.mcpServerNames.join(', ')}`}
+                                >
+                                  🔌 {plugin.mcpServerNames.length} 个 MCP：{plugin.mcpServerNames.join(', ')}
+                                </div>
+                              )}
                             </div>
-                          );
-                        })}
-                      </>
+                            <button
+                              type="button"
+                              title="管理插件"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowToolMenu(false);
+                                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: 'plugins' } }));
+                              }}
+                              className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            >
+                              <Settings2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onWorkspacePluginToggle?.(plugin.id, !isEnabled);
+                              }}
+                              className={`relative ml-2 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors hover:opacity-80 focus:outline-none ${isEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                }`}
+                            >
+                              <span
+                                className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                                  }`}
+                              />
+                            </button>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
+                        还没有插件。在
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowToolMenu(false);
+                            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: 'plugins' } }));
+                          }}
+                          className="mx-1 text-[var(--accent)] hover:underline"
+                        >
+                          设置 → 插件
+                        </button>
+                        可以从 GitHub 或本地路径安装。
+                      </div>
                     )}
               </Popover>
               </>
