@@ -220,6 +220,7 @@ interface SimpleChatInputProps {
     endConditions?: {
       maxExecutions?: number;
     };
+    runMode?: import('@/types/cronTask').CronRunMode;
   } | null;
   /** Callback when cron button is clicked */
   onCronButtonClick?: () => void;
@@ -1646,8 +1647,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
             : 'rounded-2xl'  // Normal: fully rounded
         }`}>
-          {/* Cron task overlay - shows when task is running */}
-          {!isLauncherMode && cronTask && cronTask.status === 'running' && (
+          {/* Cron task overlay - shows when task is running.
+           *  `runMode === 'new_session'` rotates a fresh sessionId per execution
+           *  (`cron_task.rs::rotate_new_session_id`), so any prior session opened
+           *  via 任务详情 →「关联会话」is already a one-shot historical chat —
+           *  it's functionally detached from the cron and the user must be able
+           *  to keep typing in it. Only `single_session` mode keeps a session as
+           *  the cron's live workbench, where the overlay is the right signal. */}
+          {!isLauncherMode && cronTask && cronTask.status === 'running' && cronTask.runMode !== 'new_session' && (
             <CronTaskOverlay
               status={cronTask.status}
               intervalMinutes={cronTask.intervalMinutes}
