@@ -7,67 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.2.17] - 2026-05-16
+## [0.2.17] - 2026-05-17
 
-> 接入 Anthropic Claude Plugin 协议：用户能从 GitHub URL / 直链 zip / 本地路径一键安装单个插件（自带 skills + agents + MCP + hooks 的目录）。**启用模型对齐 MCP**：Settings 面板的开关只决定「在各工作区是否可见」，实际启用通过 Agent 设置面板的「插件」行或 Chat 输入框工具菜单的「插件」子菜单按工作区精细控制。运行时由 Claude Agent SDK 自动展开组件，MyAgents 只管目录生命周期 + 启停状态。
+> 支持安装 Claude 插件，一行链接装一个，带 skills、子 agent、工具、hook 一并到位。新增 Chat 顶部 Agent Status 悬浮条，让你随时看到当前任务的 Todo 进度和正在跑的子 Agent。供应商可拖拽排序与按需启用，让模型选择器和 fallback 链只显示你在用的。
 
 ### Added
 
-- **设置页新增「插件 Plugins」Tab**：与技能 / 工具 MCP / 聊天机器人并列。列表显示插件名 / 版本 / 描述 / 状态（已显示/已隐藏/⚠ 异常），点开看 manifest + 组件清单（skills/agents/hooks/MCP/LSP/monitors 数量）。右上角「安装插件」弹窗支持 `owner/repo`、完整 GitHub URL、直链 `.zip`、`file:///` 本地目录四种来源。**开关只决定「在工作区里是否可见为候选」**——实际启用走下面两个新入口。
-- **多插件批量导入**：安装弹窗探测到来源包含多个插件（如 `anthropics/claude-for-legal` 13 个法律插件在仓库根目录平铺）时，自动切换到「选择视图」列出所有候选 + manifest 元数据 + 默认全选（坏 manifest 自动剔除）。用户勾选后串行批量安装，进度条 + 每条 ✓/✗ 状态。失败的不影响其它继续装。
-- **Chat 输入框「工具」菜单新增「插件 Plugins」子菜单**：与已有的 MCP 列表同级。列出所有 Settings 已显示的插件，每个一个 toggle。勾选后该插件**对当前工作区**生效（写入 Agent 配置 + 推送给 sidecar 立即生效）。如果插件自带 MCP server，副标题会标示「🔌 N 个 MCP: foo, bar」让用户知道启用后会自动加载哪些工具。
-- **Agent 设置面板（基础设置 → 工具）新增「插件 Plugins」一行**：复用 MCP 工具卡片样式（多选 checkbox），写入 `Agent.enabledPluginIds`。与 Chat 输入框的子菜单是**同一份持久化状态**，两个 UI surface 任改一个，另一个同步显示。
-- **CLI `myagents cc-plugin` 子命令族**：`list / install / uninstall / enable / disable / show`。区别于已有的 `myagents plugin`（OpenClaw IM 渠道插件），`cc-plugin` 专管 Claude 协议插件。`myagents cc-plugin install anthropics/example-plugin` 一键装，`myagents cc-plugin disable foo` 立即禁用。
-- **SDK Options.plugins 注入**：builtin runtime 在每次构建 `query()` 选项时把启用的插件路径透传给 SDK，由 SDK 自动加载插件内 skills/agents/MCP/hooks。新安装/启停后通过现有 `scheduleDeferredRestart` + `schedulePreWarm` 柔性接入（500ms 防抖），不影响进行中的对话。
-- **`~/.myagents/plugins/` 目录管理**：每个插件落到 `~/.myagents/plugins/<name>/`，跨版本可写数据存 `~/.myagents/plugins/data/<id>/`（对应 SDK 的 `${CLAUDE_PLUGIN_DATA}`）。启动时幂等创建目录。
-- **插件安装 SSE 进度**：抓取 → 解压 → 校验 → 写盘 四阶段进度通过 SSE 实时回显，UI 弹窗显示当前 phase 和短文本。
-
-### Safety
-
-- 安装弹窗显式警告"插件以你的用户权限运行任意代码 / 启动 MCP 进程 / 触发 hook 脚本"
-- 复用现有 SSRF 防护（拒 loopback / RFC1918 / 169.254 / IPv6 ULA）、zip-slip 防护
-- 写盘前 `lstatSync` 双探防断 symlink（Node v24 `cpSync` 异常红线）
-- HTTPS-only（`file://` 例外，仅本地路径放行）
-- 拒绝 `marketplace.json`（v0.2.17 暂不支持，给出友好提示"请提供单个插件子目录链接"）和多插件根（要求用户用 `/tree/<ref>/<sub/path>` 形式指向单一插件）
-- AppConfig 写盘走 `withConfigLock` 防 race
-
-### Architecture
-
-- 新增 `src/server/plugins/` 模块（url-resolver / fetcher / installer / manifest / store），全部复用 `src/server/skills/tarball-fetcher.ts` 的 SSRF + 体积限制 + 解压逻辑。
-- 新增 SSE 事件 `plugin:install-progress` + `plugins:changed`（已注册到 `SSE_EVENT_PRIORITIES` critical + `JSON_EVENTS` 白名单）
-- 新增 RestartReason `'plugins'`，agent-session 暴露 `schedulePluginDeferredRestart()` 给 admin API 调用
-- 外部 Runtime（Claude Code CLI / Codex / Gemini）路径不注入插件——它们各自管理自己的插件体系，UI 在外部 Runtime 下提示用 CLI 内的 `/plugin` 命令
-
-### Excluded (v0.2.18+)
-
-- Marketplace 协议（`.claude-plugin/marketplace.json` + `/plugin marketplace add` 等价）
-- Project scope（仓库级 `.claude/settings.json::enabledPlugins`）
-- `userConfig` 弹窗采集 + Keychain 敏感存储
-- 版本升级（本期：卸载 + 重新安装即可）
-- npm / git-subdir 源类型
-- Orphan 7-day GC
-- 透传 `extraKnownMarketplaces` 直接读 `~/.claude/`（方案 C）
-
-### Provider 启用 / 排序（PR #201）
-
-- 设置 → 供应商新增「启用和排序」对话框（dnd-kit 拖拽 + toggle）。禁用的 provider 从设置列表 / 模型选择器 / fallback 链 / cron 路由 / IM Bot picker 全面隐藏，但保留 config + API Key，重新启用即恢复。
-- `AppConfig` 新增 `providerOrder` / `disabledProviderIds` 两个 optional 字段；helper `applyProviderEnablementAndOrder` / `isProviderEnabled` / `isProviderDisabled` 为所有读取路径提供单一真相源。
-- 禁用 default provider 时自动清空 `defaultProviderId`；删除 provider 时同步 scrub 残留 ID，避免磁盘状态无限累积。
-- 新增 `decodeProviderEnvSnapshot` helper：cron followAgent / IM 桌面 handover 等"frozen snapshot"消费路径统一走它，禁用的 providerId 不会通过 stale snapshot 绕过启用闸门。
-- CLI `myagents model list` 对禁用 provider 显示 `disabled` 状态。
-- 修改文案：Settings 添加按钮 → 「添加供应商」。
-
-### Chat — Agent Status 悬浮面板
-
-- **新增 Chat 顶部「Agent Status」悬浮条**：把当前轮里的 Todo 进度（`x/y` 完成）和正在运行的 SubAgent 聚合成一条紧凑长条，点击展开看全部条目和子 Agent 详情。Todo 全部 ☑ 后驻留 0.5s 让用户看到「全完成」瞬间，再 1.5s 平滑淡出释放 DOM。
-- **SubAgent 子卡片可点击跳转**：从列表里点子 Agent 直接 scroll 到对话流里发起它的 tool call 并高亮。
-- **后台完成不消失**：BG turn 完成的 SubAgent 仍然显示，方便用户回看刚才发生了什么；与 chat input 同款 `max-w-3xl` 居中宽度对齐。
+- **Claude 插件支持**：设置页新增「插件」Tab，支持 `owner/repo`、GitHub 链接、`.zip` 直链、本地目录四种来源一键安装；插件自带的 skills、子 agent、MCP 工具、hook 由运行时自动接入。
+- **批量装插件**：一个仓库里平铺多个插件时（如 `anthropics/claude-for-legal` 的 13 个法律插件），安装弹窗自动列出全部候选默认全选，逐个安装；失败的不影响其它继续装。
+- **按工作区启用插件**：设置页的开关只决定「这个插件在工作区里是否能看到」；是否对当前工作区生效，在 Chat 输入框「工具 → 插件」子菜单或 Agent 设置面板「插件」一行勾选，两个入口同步。
+- **Chat 顶部 Agent Status 悬浮面板**：实时汇总当前轮的 Todo 进度和正在跑的子 Agent，点击展开看详情；点子 Agent 卡片直接跳到对话里发起它的位置；全部完成后自动淡出。
+- **供应商启用与排序**：设置 → 供应商新增「启用和排序」对话框，可拖拽排序、按需开关。禁用的供应商从模型选择器、fallback 链、cron 路由、IM Bot 选择器全面隐藏，但 API Key 和配置保留，重新启用即恢复。
+- **CLI `myagents cc-plugin` 子命令**：`list / install / uninstall / enable / disable / show`，命令行管理 Claude 插件。
 
 ### Fixed
 
-- **订阅登录识别**（#203）：用 Claude Code CLI v2.1.x 只跑过 `claude auth login` 的用户，OAuth token 写在 macOS Keychain（或 `~/.credentials.json`）但 `~/.claude.json` 没有 `oauthAccount` 元数据，以前会被 MyAgents 误判成「未登录」。现在改为两级探测：先看 oauthAccount 拿账号信息，没有就直接探 Keychain / credentials 文件，再让 SDK 真实 verify，能登就让你登。
-- **Cron 任务 `--model` 在外部 Runtime 生效**（#204）：以前 `myagents task create-direct --runtime codex --model X` 的 `--model` 会被 Agent 默认模型覆盖掉（特别是 Codex 这种和默认模型名不一样的 Runtime，会直接 404 报 unknown model）。已在 cron 执行路径六处分支统一精度："任务里写的 model" 优先于 "Agent 快照里的 model"。
-- **Plugin Bridge 加载稳定性**（#202）：修复 SDK shim 在解析包含 `{` `}` 注释的 export 块时 brace 匹配错位，导致部分插件无法加载。
+- **订阅登录识别**（#203）：在 Claude Code CLI 上只跑过 `claude auth login`、OAuth token 仅存在系统 Keychain 的用户，之前会被误判成「未登录」导致订阅模型不可用。现在能正确识别。
+- **Cron 任务的 `--model` 在外部 Runtime 生效**（#204）：之前 `myagents task create-direct --runtime codex --model X` 里的 `--model` 会被 Agent 默认模型覆盖，Codex 等模型名不同的 Runtime 会直接报 unknown model。现已修正优先级。
 
 ---
 
