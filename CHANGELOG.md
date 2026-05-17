@@ -17,13 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **批量装插件**：一个仓库里平铺多个插件时（如 `anthropics/claude-for-legal` 的 13 个法律插件），安装弹窗自动列出全部候选默认全选，逐个安装；失败的不影响其它继续装。
 - **按工作区启用插件**：设置页的开关只决定「这个插件在工作区里是否能看到」；是否对当前工作区生效，在 Chat 输入框「工具 → 插件」子菜单或 Agent 设置面板「插件」一行勾选，两个入口同步。
 - **Chat 顶部 Agent Status 悬浮面板**：实时汇总当前轮的 Todo 进度和正在跑的子 Agent，点击展开看详情；点子 Agent 卡片直接跳到对话里发起它的位置；全部完成后自动淡出。
-- **供应商启用与排序**：设置 → 供应商新增「启用和排序」对话框，可拖拽排序、按需开关。禁用的供应商从模型选择器、fallback 链、cron 路由、IM Bot 选择器全面隐藏，但 API Key 和配置保留，重新启用即恢复。
+- **供应商启用与排序**（[#201](https://github.com/hAcKlyc/MyAgents/pull/201) by [@Wesegm](https://github.com/Wesegm)，社区贡献 🙏）：设置 → 供应商新增「启用和排序」对话框，可拖拽排序、按需开关。禁用的供应商从模型选择器、fallback 链、cron 路由、IM Bot 选择器全面隐藏，但 API Key 和配置保留，重新启用即恢复。
 - **CLI `myagents cc-plugin` 子命令**：`list / install / uninstall / enable / disable / show`，命令行管理 Claude 插件。
 
 ### Fixed
 
-- **订阅登录识别**（#203）：在 Claude Code CLI 上只跑过 `claude auth login`、OAuth token 仅存在系统 Keychain 的用户，之前会被误判成「未登录」导致订阅模型不可用。现在能正确识别。
-- **Cron 任务的 `--model` 在外部 Runtime 生效**（#204）：之前 `myagents task create-direct --runtime codex --model X` 里的 `--model` 会被 Agent 默认模型覆盖，Codex 等模型名不同的 Runtime 会直接报 unknown model。现已修正优先级。
+- **订阅登录识别**（[#203](https://github.com/hAcKlyc/MyAgents/issues/203)，感谢 [@TimCheung-jx](https://github.com/TimCheung-jx) 反馈）：在 Claude Code CLI 上只跑过 `claude auth login`、OAuth token 仅存在系统 Keychain 的用户，之前会被误判成「未登录」导致订阅模型不可用。现在能正确识别。
+- **Cron 任务的 `--model` 在外部 Runtime 生效**（[#204](https://github.com/hAcKlyc/MyAgents/issues/204)，感谢 [@sundanian1991](https://github.com/sundanian1991) 反馈）：之前 `myagents task create-direct --runtime codex --model X` 里的 `--model` 会被 Agent 默认模型覆盖，Codex 等模型名不同的 Runtime 会直接报 unknown model。现已修正优先级。
 
 ---
 
