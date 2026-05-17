@@ -2128,9 +2128,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 placement="top-start"
                 // max-h + overflow-y-auto so a workspace with 13+ enabled
                 // plugins (anthropics/claude-for-legal etc.) doesn't blow
-                // past the viewport top. 60vh keeps it readable on small
-                // screens while still showing ~8 rows on a 13" laptop.
-                className="w-64 max-h-[60vh] overflow-y-auto py-1"
+                // past the viewport top. 45vh shows ~6 rows on a 13"
+                // laptop and leaves visible breathing room above the
+                // popover so the user keeps spatial context.
+                className="w-64 max-h-[45vh] overflow-y-auto py-1"
               >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)
