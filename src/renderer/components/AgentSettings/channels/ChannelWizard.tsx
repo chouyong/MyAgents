@@ -412,7 +412,12 @@ export default function ChannelWizard({
     const buildOpenclawConfig = useCallback((): Record<string, string> => {
         const cfg: Record<string, string> = { ...openclawSchemaValues };
         for (const f of openclawCustomFields) {
-            if (f.key.trim()) cfg[f.key.trim()] = f.value.trim();
+            const key = f.key.trim();
+            const value = f.value.trim();
+            // Skip empty values so pre-populated requiredField keys (initialized as
+            // {key, value:''}) don't wipe values the user typed via the dualConfig
+            // schema UI (which writes to openclawSchemaValues under the same keys).
+            if (key && value) cfg[key] = value;
         }
         return cfg;
     }, [openclawSchemaValues, openclawCustomFields]);
