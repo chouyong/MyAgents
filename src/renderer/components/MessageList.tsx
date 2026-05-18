@@ -403,7 +403,11 @@ const MessageList = memo(function MessageList({
     // disappeared while neighbouring items merged. flow-root keeps the
     // measurement fix without the clipping.
     return (
-      <div className="mx-auto max-w-3xl px-3 py-1 flow-root" data-chat-search-scope="">
+      <div
+        className="mx-auto max-w-3xl px-3 py-1 flow-root"
+        data-chat-search-scope=""
+        data-message-id={message.id}
+      >
         <Message
           message={message}
           isLoading={isStreamingMsg && isLoadingRef.current}

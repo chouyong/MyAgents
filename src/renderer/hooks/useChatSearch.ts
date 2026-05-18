@@ -1,22 +1,25 @@
 /**
  * useChatSearch — in-page text finder for the Chat message list.
  *
- * Uses the CSS Custom Highlight API (CSS.highlights) instead of mutating the
- * DOM with <mark> tags. Virtuoso virtualizes + streaming constantly reconciles,
- * so any injected nodes would be wiped. Highlight API paints via Range objects
- * without touching the DOM tree.
+ * Counts matches against the full message array (so virtualized / off-screen
+ * messages are included), then paints CSS Custom Highlight ranges on whatever
+ * is currently rendered. Navigation (Next/Prev) jumps to the target message
+ * via Virtuoso.scrollToIndex when off-screen, then re-paints once the message
+ * mounts. A card-pulse animation fires on every navigation so the user knows
+ * where they landed even if the precise word highlight isn't paintable (rich
+ * content where extracted source text and rendered DOM text diverge — e.g.
+ * KaTeX, mention pills, complex tables).
  *
- * Rescans are driven by three sources: query change (debounced), scroller
- * scroll (Virtuoso unmounts items off-screen), and MutationObserver (streaming
- * appends / edits / rewinds). Without the latter two, stored Range objects
- * would go stale as soon as the user scrolls or the AI emits more content.
- *
- * Scope: only text nodes inside elements marked with `[data-chat-search-scope]`
- * (currently each message wrapper in MessageList). This excludes status
- * timers, permission prompts, and split panels.
+ * Scope is text nodes inside `[data-chat-search-scope]` (each MessageList
+ * row wrapper), excluding status timers, permission prompts, split panels.
+ * The wrapper now also carries `data-message-id` so we can find the DOM
+ * subtree of a specific message when painting "current" highlight.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { VirtuosoHandle } from 'react-virtuoso';
+
+import type { Message } from '@/types/chat';
 
 // ── CSS Custom Highlight API types (not yet in lib.dom for all TS versions) ──
 //
@@ -44,7 +47,13 @@ type HighlightCtor = new (...ranges: Range[]) => HighlightLike;
 const HIGHLIGHT_ALL = 'chat-search';
 const HIGHLIGHT_CURRENT = 'chat-search-current';
 const SCOPE_ATTR = 'data-chat-search-scope';
+const MESSAGE_ID_ATTR = 'data-message-id';
+const PULSE_CLASS = 'chat-search-msg-pulse';
 const DEBOUNCE_MS = 150;
+// Number of rAFs to wait after virtuoso.scrollToIndex before retrying the DOM
+// paint. One frame schedules Virtuoso's mount; the second lets the row's
+// subtree (Markdown / KaTeX / tool cards) finish first-render.
+const PAINT_RETRY_FRAMES = 2;
 
 function getCssHighlights(): CssWithHighlights | null {
   if (typeof CSS === 'undefined') return null;
@@ -63,15 +72,14 @@ export function isHighlightApiSupported(): boolean {
 }
 
 /**
- * Inject the ::highlight() CSS rules at runtime.
+ * Inject the ::highlight() CSS rules + the card-pulse animation at runtime.
  *
- * We cannot put these rules in index.css because LightningCSS (Tailwind v4's
- * CSS optimizer, ≤1.30.2 at time of writing) doesn't yet recognize
- * `::highlight(name)` and emits a warning for every occurrence during build.
- * Runtime injection sidesteps the build-time parser — the browser's own CSS
- * engine handles `::highlight()` correctly.
- *
- * Idempotent: the style element is created at most once per document.
+ * ::highlight() rules cannot live in index.css because LightningCSS (Tailwind
+ * v4's CSS optimizer, ≤1.30.2 at time of writing) emits a warning for every
+ * occurrence during build. Runtime injection sidesteps the build-time parser
+ * — the browser's own CSS engine handles ::highlight() correctly. The pulse
+ * animation is kept here too so the whole search feature ships as one CSS
+ * payload, idempotent.
  */
 const STYLE_ELEMENT_ID = 'chat-search-highlight-styles';
 function ensureHighlightStyles(): void {
@@ -79,14 +87,11 @@ function ensureHighlightStyles(): void {
   if (document.getElementById(STYLE_ELEMENT_ID)) return;
   const style = document.createElement('style');
   style.id = STYLE_ELEMENT_ID;
-  // Build the selector via String.fromCharCode to keep the literal
-  // "::highlight(" out of any future static-analysis passes that might
-  // also choke on it — overkill today, cheap insurance tomorrow.
-  // Match the file-search highlight (SearchHighlight.tsx):
-  //   bg-[var(--accent)]/30 text-[var(--ink)]
-  // font-weight/border-radius/padding from the file-search mark are not
-  // rendered inside ::highlight() — the spec restricts pseudo-elements on
-  // live ranges to color / background / text-decoration / text-shadow only.
+  // Build the selector via string concat to keep the literal "::highlight("
+  // out of any future static-analysis passes that might also choke on it.
+  // The Highlight pseudo-element spec only allows color / background-color /
+  // text-decoration / text-shadow on live ranges — font-weight / padding /
+  // border-radius from the file-search mark aren't paintable here.
   const hl = '::' + 'highlight';
   style.textContent = `
     ${hl}(chat-search) {
@@ -97,62 +102,113 @@ function ensureHighlightStyles(): void {
       background-color: var(--accent);
       color: #ffffff;
     }
+    @keyframes chat-search-msg-pulse {
+      0%   {
+        box-shadow: 0 0 0 2px var(--accent), 0 0 16px 4px color-mix(in srgb, var(--accent) 30%, transparent);
+        background-color: color-mix(in srgb, var(--accent) 8%, transparent);
+      }
+      100% {
+        box-shadow: 0 0 0 0 transparent;
+        background-color: transparent;
+      }
+    }
+    [${SCOPE_ATTR}].${PULSE_CLASS} {
+      animation: chat-search-msg-pulse 1.4s ease-out;
+      border-radius: 0.5rem;
+    }
   `;
   document.head.appendChild(style);
 }
 
 /**
- * Walk text nodes inside every `[data-chat-search-scope]` subtree under `root`.
- * Using a per-scope walker (instead of one big walker with an acceptNode
- * ancestor check) avoids an O(depth) walk per text node.
+ * Extract the searchable text representation of a message. This is the
+ * authoritative source for `matchCount` — including for virtualized messages
+ * that aren't in DOM.
+ *
+ * v1 scope: TEXT BLOCKS ONLY (plus string-typed content). Deliberately excludes:
+ *   • thinking blocks    — collapsed-by-default, body is unmounted
+ *   • tool_use cards     — input/result is collapsed; tool.result may be
+ *                          truncated at render time (ToolUse.tsx 50k/200k
+ *                          caps); counter inclusion would inflate matchCount
+ *                          with characters the user can never see
+ *   • server_tool_use    — same reasoning as tool_use
+ *
+ * Searching inside thinking / tool I/O is out of scope for v1: the
+ * source-vs-DOM divergence makes occurrence indexing unreliable and the
+ * counter untrustworthy. If/when needed, the right fix is to either count
+ * what the Message component will display (not raw source) or auto-expand
+ * collapsed rows during navigation.
+ *
+ * Markdown source vs rendered DOM divergence note: text blocks return raw
+ * markdown source, not the rendered text. For plain prose this is identical
+ * to the DOM. For markdown syntax characters (`**`, `_`, `#`) source count
+ * may slightly exceed DOM count. When that happens the current-match Range
+ * lookup falls back to "card pulse only" — user still lands in the right
+ * message, just without a precise word highlight.
  */
-function collectTextNodes(root: HTMLElement): Text[] {
-  const scopes = root.querySelectorAll<HTMLElement>(`[${SCOPE_ATTR}]`);
-  const nodes: Text[] = [];
-  for (const scope of scopes) {
-    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const text = node.nodeValue;
-        if (!text || !text.trim()) return NodeFilter.FILTER_REJECT;
-        const parent = node.parentElement;
-        if (parent) {
-          const tag = parent.tagName;
-          if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
-            return NodeFilter.FILTER_REJECT;
-          }
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    let current = walker.nextNode();
-    while (current) {
-      nodes.push(current as Text);
-      current = walker.nextNode();
-    }
+function extractMessageSearchText(message: Message): string {
+  if (typeof message.content === 'string') return message.content;
+  const parts: string[] = [];
+  for (const block of message.content) {
+    if (block.type === 'text' && block.text) parts.push(block.text);
   }
-  return nodes;
+  return parts.join('\n');
 }
 
-/** Build Range objects for every case-insensitive match of `query` in `nodes`. */
-function buildRanges(nodes: Text[], query: string): Range[] {
+/** Count case-insensitive (non-overlapping) occurrences of needle in haystack. */
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  const hay = haystack.toLowerCase();
+  const n = needle.toLowerCase();
+  let count = 0;
+  let from = 0;
+  while (from <= hay.length - n.length) {
+    const idx = hay.indexOf(n, from);
+    if (idx === -1) break;
+    count += 1;
+    from = idx + n.length;
+  }
+  return count;
+}
+
+/** Build Range objects for every case-insensitive match of `query` within `scope`. */
+function buildRangesInScope(scope: Element, query: string): Range[] {
   if (!query) return [];
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const text = node.nodeValue;
+      if (!text || !text.trim()) return NodeFilter.FILTER_REJECT;
+      const parent = node.parentElement;
+      if (parent) {
+        const tag = parent.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
+          return NodeFilter.FILTER_REJECT;
+        }
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
   const ranges: Range[] = [];
   const needle = query.toLowerCase();
   const needleLen = needle.length;
-  for (const node of nodes) {
+  let current = walker.nextNode();
+  while (current) {
+    const node = current as Text;
     const text = node.nodeValue;
-    if (!text) continue;
-    const hay = text.toLowerCase();
-    let from = 0;
-    while (from <= hay.length - needleLen) {
-      const idx = hay.indexOf(needle, from);
-      if (idx === -1) break;
-      const range = document.createRange();
-      range.setStart(node, idx);
-      range.setEnd(node, idx + needleLen);
-      ranges.push(range);
-      from = idx + needleLen;
+    if (text) {
+      const hay = text.toLowerCase();
+      let from = 0;
+      while (from <= hay.length - needleLen) {
+        const idx = hay.indexOf(needle, from);
+        if (idx === -1) break;
+        const range = document.createRange();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + needleLen);
+        ranges.push(range);
+        from = idx + needleLen;
+      }
     }
+    current = walker.nextNode();
   }
   return ranges;
 }
@@ -174,28 +230,82 @@ function uncollapseAncestors(start: Element | null, stop: Element | null): void 
   }
 }
 
-/** Scroll `scroller` so the center of `range` lands at the scroller's vertical center. */
-function scrollRangeIntoView(scroller: HTMLElement, range: Range): void {
-  // Ensure the range's container is still attached — otherwise getBoundingClientRect
-  // returns an all-zero rect and we'd scroll to the top.
-  const container = range.startContainer;
-  if (!container.isConnected) return;
-  const rangeRect = range.getBoundingClientRect();
+/** Scroll `scroller` so the center of `target` (Range or Element) lands at the scroller's vertical center. */
+function scrollIntoCenter(scroller: HTMLElement, target: Range | Element): void {
+  const rect = target.getBoundingClientRect();
   const scrollerRect = scroller.getBoundingClientRect();
-  if (rangeRect.height === 0 && rangeRect.width === 0) {
-    // Degenerate (empty/collapsed) rect — fall back to parent element.
-    const parent = container.parentElement;
-    if (parent) parent.scrollIntoView({ block: 'center' });
+  if (rect.height === 0 && rect.width === 0) {
+    if (target instanceof Element) target.scrollIntoView({ block: 'center' });
     return;
   }
-  const rangeCenter = rangeRect.top + rangeRect.height / 2;
+  const targetCenter = rect.top + rect.height / 2;
   const scrollerCenter = scrollerRect.top + scrollerRect.height / 2;
-  const delta = rangeCenter - scrollerCenter;
-  scroller.scrollBy({ top: delta });
+  scroller.scrollBy({ top: targetCenter - scrollerCenter });
+}
+
+/** Find the scope wrapper element for `messageId` under `scroller`. */
+function findMessageScope(scroller: HTMLElement, messageId: string): HTMLElement | null {
+  return scroller.querySelector<HTMLElement>(
+    `[${SCOPE_ATTR}][${MESSAGE_ID_ATTR}="${CSS.escape(messageId)}"]`,
+  );
+}
+
+/**
+ * Restart the card-pulse animation on `scope`. Standard CSS animation restart
+ * trick: drop the class, force reflow, re-add. Works regardless of how many
+ * times navigation lands on the same message in a row.
+ */
+function pulseMessageCard(scope: HTMLElement): void {
+  scope.classList.remove(PULSE_CLASS);
+  // Force reflow so the next class addition starts a fresh animation cycle.
+  void scope.offsetWidth;
+  scope.classList.add(PULSE_CLASS);
+}
+
+interface MessageMatchSummary {
+  /** Index into the `messages` prop. */
+  messageIndex: number;
+  messageId: string;
+  /** Non-overlapping occurrence count for this message. */
+  count: number;
+}
+
+interface MatchPosition {
+  messageIndex: number;
+  messageId: string;
+  /** 0-based occurrence index within the owning message. */
+  occInMessage: number;
+}
+
+/** Resolve a flat global match index into per-message coordinates. */
+function resolveFlatIndex(
+  summaries: MessageMatchSummary[],
+  flatIdx: number,
+): MatchPosition | null {
+  if (flatIdx < 0) return null;
+  let remaining = flatIdx;
+  for (const s of summaries) {
+    if (remaining < s.count) {
+      return { messageIndex: s.messageIndex, messageId: s.messageId, occInMessage: remaining };
+    }
+    remaining -= s.count;
+  }
+  return null;
 }
 
 export interface UseChatSearchOptions {
   scrollerRef: React.RefObject<HTMLElement | null>;
+  virtuosoRef: React.RefObject<VirtuosoHandle | null>;
+  /** Full message list (history + streaming combined) — drives the count. */
+  messages: Message[];
+  /**
+   * Offset that Virtuoso applies to incoming indices. When the chat lazy-loads
+   * older pages, MessageList passes `firstItemIndex` to Virtuoso so its
+   * internal indices stay stable across paginations; scrollToIndex expects
+   * the SAME offset domain. Pass through here so our jumps don't drift after
+   * the user scrolls to an older page.
+   */
+  firstItemIndex?: number;
   /** When true, the hook is active: scan + paint highlights. */
   active: boolean;
 }
@@ -209,27 +319,37 @@ export interface ChatSearchController {
   prev: () => void;
   /** True if the Highlight API is available in this environment. */
   supported: boolean;
-  /** True while a scan is pending (debounced or in-flight). */
   hasQuery: boolean;
 }
 
-export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): ChatSearchController {
+export function useChatSearch({
+  scrollerRef,
+  virtuosoRef,
+  messages,
+  firstItemIndex = 0,
+  active,
+}: UseChatSearchOptions): ChatSearchController {
   const [query, setQueryState] = useState('');
   const [matchCount, setMatchCount] = useState(0);
   const [currentIndex, setCurrentIndex] = useState(-1);
 
-  const rangesRef = useRef<Range[]>([]);
-  // Mirror of currentIndex so next/prev can read the latest value synchronously
-  // without closing over stale state and without embedding side effects inside
-  // a setState updater (which would double-fire in StrictMode).
+  // Refs mirror state for use in imperative callbacks without stale closures.
   const currentIndexRef = useRef(-1);
   const queryRef = useRef('');
-  // Mirrors `query` for use inside imperative callbacks that don't re-run
-  // on every render. Writing to a ref during render is flagged by
-  // `react-hooks/refs`, but the value written is pure — it's the same value
-  // React will commit — so StrictMode double-invocation is a no-op here.
+  // Writing to a ref during render is flagged by `react-hooks/refs`, but the
+  // value is pure — same value React will commit — so StrictMode double-
+  // invocation is a no-op. Mirrors `query` so navigation callbacks can read
+  // the latest value without depending on it (and thus re-creating).
   // eslint-disable-next-line react-hooks/refs
   queryRef.current = query;
+  const messagesRef = useRef(messages);
+  // Same justification as queryRef above.
+  // eslint-disable-next-line react-hooks/refs
+  messagesRef.current = messages;
+  const firstItemIndexRef = useRef(firstItemIndex);
+  // eslint-disable-next-line react-hooks/refs
+  firstItemIndexRef.current = firstItemIndex;
+  const summariesRef = useRef<MessageMatchSummary[]>([]);
 
   const supported = useMemo(() => {
     const ok = isHighlightApiSupported();
@@ -244,167 +364,296 @@ export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): Ch
     css.highlights.delete(HIGHLIGHT_CURRENT);
   }, []);
 
-  const paintHighlights = useCallback(
-    (ranges: Range[], focusedIdx: number) => {
+  /**
+   * Paint all visible ranges (the "all" highlight) + the current match (the
+   * "current" highlight). `currentDomRange` is the resolved DOM Range for the
+   * focused match, or null if it isn't currently in DOM (off-screen virtualized
+   * or rich-content miss). When null, the current match isn't drawn — the
+   * card-pulse animation visually communicates the jump instead.
+   */
+  const paintAllAndCurrent = useCallback(
+    (currentDomRange: Range | null) => {
       const css = getCssHighlights();
       const HighlightImpl = getHighlightCtor();
       if (!css?.highlights || !HighlightImpl) return;
+      const scroller = scrollerRef.current;
+      const q = queryRef.current;
       css.highlights.delete(HIGHLIGHT_ALL);
       css.highlights.delete(HIGHLIGHT_CURRENT);
-      if (ranges.length === 0) return;
+      if (!scroller || !q) return;
+      const scopes = scroller.querySelectorAll<HTMLElement>(`[${SCOPE_ATTR}]`);
       const others: Range[] = [];
-      for (let i = 0; i < ranges.length; i += 1) {
-        if (i !== focusedIdx) others.push(ranges[i]);
+      for (const scope of scopes) {
+        const ranges = buildRangesInScope(scope, q);
+        for (const r of ranges) {
+          if (currentDomRange && rangesEqual(r, currentDomRange)) continue;
+          others.push(r);
+        }
       }
       if (others.length > 0) {
         css.highlights.set(HIGHLIGHT_ALL, new HighlightImpl(...others));
       }
-      if (focusedIdx >= 0 && focusedIdx < ranges.length) {
-        css.highlights.set(HIGHLIGHT_CURRENT, new HighlightImpl(ranges[focusedIdx]));
+      if (currentDomRange) {
+        css.highlights.set(HIGHLIGHT_CURRENT, new HighlightImpl(currentDomRange));
       }
-    },
-    [],
-  );
-
-  const focusRange = useCallback(
-    (idx: number) => {
-      const ranges = rangesRef.current;
-      if (idx < 0 || idx >= ranges.length) return;
-      const range = ranges[idx];
-      const scroller = scrollerRef.current;
-      if (!scroller) return;
-      const parent = range.startContainer.parentElement;
-      if (parent) uncollapseAncestors(parent, scroller);
-      scrollRangeIntoView(scroller, range);
     },
     [scrollerRef],
   );
 
-  // ── Core scan — recomputes ranges from current query + DOM state ──
-  // `preserveFocus`: when triggered by scroll / MutationObserver, keep the
-  // user's current match position if still valid; when triggered by query
-  // change, reset to 0.
-  const runScan = useCallback(
-    (preserveFocus: boolean) => {
-      if (!active || !supported) {
-        rangesRef.current = [];
-        currentIndexRef.current = -1;
-        setMatchCount(0);
-        setCurrentIndex(-1);
-        clearHighlights();
-        return;
-      }
-      const scroller = scrollerRef.current;
-      const q = queryRef.current;
-      if (!scroller || !q) {
-        rangesRef.current = [];
-        currentIndexRef.current = -1;
-        setMatchCount(0);
-        setCurrentIndex(-1);
-        clearHighlights();
-        return;
-      }
-      const textNodes = collectTextNodes(scroller);
-      const ranges = buildRanges(textNodes, q);
-      rangesRef.current = ranges;
+  /**
+   * Resolve the current focused match (currentIndexRef) to a DOM Range if
+   * the message is rendered AND the n-th occurrence is locatable. Returns
+   * null if the message scope isn't in DOM yet or the rendered text doesn't
+   * carry that many matches (rich-content divergence).
+   */
+  const resolveCurrentRange = useCallback((): Range | null => {
+    const pos = resolveFlatIndex(summariesRef.current, currentIndexRef.current);
+    if (!pos) return null;
+    const scroller = scrollerRef.current;
+    if (!scroller) return null;
+    const scope = findMessageScope(scroller, pos.messageId);
+    if (!scope) return null;
+    const ranges = buildRangesInScope(scope, queryRef.current);
+    return ranges[pos.occInMessage] ?? null;
+  }, [scrollerRef]);
 
-      let nextIdx: number;
-      if (ranges.length === 0) {
-        nextIdx = -1;
-      } else if (preserveFocus) {
-        const prior = currentIndexRef.current;
-        nextIdx = prior >= 0 && prior < ranges.length ? prior : 0;
-      } else {
-        nextIdx = 0;
+  /**
+   * Recompute match summaries from the messages array + current query. This
+   * is the single source of truth for `matchCount`; the DOM paint pass below
+   * is purely visual.
+   */
+  const recomputeSummaries = useCallback(() => {
+    const q = queryRef.current;
+    if (!active || !supported || !q) {
+      summariesRef.current = [];
+      return 0;
+    }
+    const msgs = messagesRef.current;
+    const summaries: MessageMatchSummary[] = [];
+    let total = 0;
+    for (let i = 0; i < msgs.length; i += 1) {
+      const m = msgs[i];
+      const text = extractMessageSearchText(m);
+      const count = countOccurrences(text, q);
+      if (count > 0) {
+        summaries.push({ messageIndex: i, messageId: m.id, count });
+        total += count;
       }
-      currentIndexRef.current = nextIdx;
-      setMatchCount(ranges.length);
-      setCurrentIndex(nextIdx);
-      paintHighlights(ranges, nextIdx);
-      if (nextIdx >= 0 && !preserveFocus) focusRange(nextIdx);
+    }
+    summariesRef.current = summaries;
+    return total;
+  }, [active, supported]);
+
+  /**
+   * Reconcile after `messages` / `query` / scroll / mutation changes:
+   *  1. Recompute summaries + total from the messages array
+   *  2. Preserve the user's focus position when possible (by messageId +
+   *     occInMessage); else clamp to a valid position
+   *  3. Re-paint based on what's currently in DOM
+   */
+  const reconcile = useCallback(
+    ({ resetFocus }: { resetFocus: boolean }) => {
+      if (!active || !supported) {
+        summariesRef.current = [];
+        currentIndexRef.current = -1;
+        setMatchCount(0);
+        setCurrentIndex(-1);
+        clearHighlights();
+        return;
+      }
+      // Capture the prior focus before recompute so we can try to preserve it.
+      const priorFlat = currentIndexRef.current;
+      const priorPos = resolveFlatIndex(summariesRef.current, priorFlat);
+
+      const total = recomputeSummaries();
+      let nextFlat: number;
+      if (total === 0) {
+        nextFlat = -1;
+      } else if (resetFocus || !priorPos) {
+        nextFlat = 0;
+      } else {
+        // Try to re-locate the same (messageId, occInMessage) in the new summaries.
+        const newSummaryIdx = summariesRef.current.findIndex(s => s.messageId === priorPos.messageId);
+        if (newSummaryIdx === -1) {
+          nextFlat = 0;
+        } else {
+          const offset = summariesRef.current.slice(0, newSummaryIdx).reduce((acc, s) => acc + s.count, 0);
+          const newCount = summariesRef.current[newSummaryIdx].count;
+          const occ = Math.min(priorPos.occInMessage, newCount - 1);
+          nextFlat = offset + occ;
+        }
+      }
+      currentIndexRef.current = nextFlat;
+      setMatchCount(total);
+      setCurrentIndex(nextFlat);
+      paintAllAndCurrent(resolveCurrentRange());
     },
-    [active, supported, scrollerRef, clearHighlights, paintHighlights, focusRange],
+    [active, supported, clearHighlights, recomputeSummaries, paintAllAndCurrent, resolveCurrentRange],
   );
 
-  // ── Debounced scheduler for query changes and DOM mutations ──
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleRescan = useCallback(
-    (preserveFocus: boolean) => {
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = setTimeout(() => {
-        debounceTimerRef.current = null;
-        runScan(preserveFocus);
+  // ── Two debounced paths ──
+  // Recompute path: query / messages changed → re-extract summaries (O(messages))
+  //                 + repaint
+  // Repaint path:   scroll / DOM mutation → just rebuild visible Ranges and
+  //                 paint. Summaries don't change because messages didn't change.
+  // Sharing one debounce timer would make the cheaper repaint pay the recompute
+  // cost on every scroll tick in a 500-message session.
+  const recomputeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const repaintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleRecompute = useCallback(
+    (resetFocus: boolean) => {
+      if (recomputeTimerRef.current) clearTimeout(recomputeTimerRef.current);
+      recomputeTimerRef.current = setTimeout(() => {
+        recomputeTimerRef.current = null;
+        reconcile({ resetFocus });
       }, DEBOUNCE_MS);
     },
-    [runScan],
+    [reconcile],
   );
 
-  // Rescan on query change (reset focus to first match).
+  const scheduleRepaint = useCallback(() => {
+    if (repaintTimerRef.current) clearTimeout(repaintTimerRef.current);
+    repaintTimerRef.current = setTimeout(() => {
+      repaintTimerRef.current = null;
+      if (!active || !supported) return;
+      paintAllAndCurrent(resolveCurrentRange());
+    }, DEBOUNCE_MS);
+  }, [active, supported, paintAllAndCurrent, resolveCurrentRange]);
+
+  // Query change → recompute + reset focus to first match.
   useEffect(() => {
     if (!active) return;
-    scheduleRescan(false);
+    scheduleRecompute(true);
     return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = null;
+      if (recomputeTimerRef.current) {
+        clearTimeout(recomputeTimerRef.current);
+        recomputeTimerRef.current = null;
       }
     };
-  }, [active, query, scheduleRescan]);
+  }, [active, query, scheduleRecompute]);
 
-  // Observe scroller scroll + DOM mutations so Virtuoso virtualization and
-  // streaming content updates don't leave stale Range objects behind.
+  // Messages-array change (streaming, history append, rewind) → recompute,
+  // preserve focus via (messageId, occInMessage) re-anchoring.
+  useEffect(() => {
+    if (!active) return;
+    scheduleRecompute(false);
+  }, [active, messages, scheduleRecompute]);
+
+  // Scroll + DOM mutations: Virtuoso unmounts off-screen items and streaming
+  // appends new content. Re-paint so Ranges stay live, but DON'T re-sum the
+  // messages array — that count is invariant under scroll.
   useEffect(() => {
     if (!active) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
 
-    const onChange = () => scheduleRescan(true);
-
-    scroller.addEventListener('scroll', onChange, { passive: true });
-    const mo = new MutationObserver(onChange);
-    mo.observe(scroller, {
-      childList: true,
-      characterData: true,
-      subtree: true,
-    });
-
+    scroller.addEventListener('scroll', scheduleRepaint, { passive: true });
+    const mo = new MutationObserver(scheduleRepaint);
+    mo.observe(scroller, { childList: true, characterData: true, subtree: true });
     return () => {
-      scroller.removeEventListener('scroll', onChange);
+      scroller.removeEventListener('scroll', scheduleRepaint);
       mo.disconnect();
     };
-  }, [active, scrollerRef, scheduleRescan]);
+  }, [active, scrollerRef, scheduleRepaint]);
 
   // Clear highlights on deactivation / unmount.
   useEffect(() => {
     if (!active) clearHighlights();
     return () => {
       clearHighlights();
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = null;
+      if (recomputeTimerRef.current) {
+        clearTimeout(recomputeTimerRef.current);
+        recomputeTimerRef.current = null;
+      }
+      if (repaintTimerRef.current) {
+        clearTimeout(repaintTimerRef.current);
+        repaintTimerRef.current = null;
       }
     };
   }, [active, clearHighlights]);
 
+  /**
+   * Land on the focused match: pulse the card, then paint + scroll the precise
+   * Range into view. If the message is off-screen, jump via Virtuoso first,
+   * then retry the DOM lookup once it mounts.
+   */
+  const focusCurrent = useCallback(() => {
+    const pos = resolveFlatIndex(summariesRef.current, currentIndexRef.current);
+    if (!pos) {
+      paintAllAndCurrent(null);
+      return;
+    }
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+
+    const tryPaintAndScroll = (): boolean => {
+      const scope = findMessageScope(scroller, pos.messageId);
+      if (!scope) return false;
+      const ranges = buildRangesInScope(scope, queryRef.current);
+      const target = ranges[pos.occInMessage] ?? null;
+      paintAllAndCurrent(target);
+      // Card pulse fires regardless of whether we located the precise Range —
+      // it's the consistent "you arrived here" signal across plain text +
+      // rich content (where the precise Range may not be findable).
+      pulseMessageCard(scope);
+      if (target) {
+        const parent = target.startContainer.parentElement;
+        if (parent) uncollapseAncestors(parent, scroller);
+        scrollIntoCenter(scroller, target);
+      } else {
+        scrollIntoCenter(scroller, scope);
+      }
+      return true;
+    };
+
+    if (tryPaintAndScroll()) return;
+
+    // Off-screen: ask Virtuoso to mount the row, then retry. Virtuoso's
+    // scrollToIndex consumes indices in the same domain as firstItemIndex
+    // (which can be non-zero when older pages have been loaded).
+    const handle = virtuosoRef.current;
+    if (handle) {
+      handle.scrollToIndex({
+        index: pos.messageIndex + firstItemIndexRef.current,
+        behavior: 'auto',
+        align: 'center',
+      });
+    }
+    let attempt = 0;
+    const retry = () => {
+      if (tryPaintAndScroll()) return;
+      attempt += 1;
+      if (attempt >= PAINT_RETRY_FRAMES) {
+        // Give up the precise paint; the pulse + scroll already landed the
+        // user in the right neighbourhood when scrollToIndex eventually
+        // commits, and the MutationObserver-driven reconcile will pick up
+        // the row's Ranges on the next paint cycle.
+        return;
+      }
+      requestAnimationFrame(retry);
+    };
+    requestAnimationFrame(retry);
+  }, [scrollerRef, virtuosoRef, paintAllAndCurrent]);
+
   const next = useCallback(() => {
-    const total = rangesRef.current.length;
+    const total = summariesRef.current.reduce((acc, s) => acc + s.count, 0);
     if (total === 0) return;
     const nextIdx = (currentIndexRef.current + 1) % total;
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
-    paintHighlights(rangesRef.current, nextIdx);
-    focusRange(nextIdx);
-  }, [paintHighlights, focusRange]);
+    focusCurrent();
+  }, [focusCurrent]);
 
   const prev = useCallback(() => {
-    const total = rangesRef.current.length;
+    const total = summariesRef.current.reduce((acc, s) => acc + s.count, 0);
     if (total === 0) return;
-    const nextIdx = currentIndexRef.current - 1 < 0 ? total - 1 : currentIndexRef.current - 1;
+    const cur = currentIndexRef.current;
+    const nextIdx = cur - 1 < 0 ? total - 1 : cur - 1;
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
-    paintHighlights(rangesRef.current, nextIdx);
-    focusRange(nextIdx);
-  }, [paintHighlights, focusRange]);
+    focusCurrent();
+  }, [focusCurrent]);
 
   const setQuery = useCallback((value: string) => {
     setQueryState(value);
@@ -420,4 +669,17 @@ export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): Ch
     supported,
     hasQuery: query.length > 0,
   };
+}
+
+// Range equality — same start container / start offset / end offset is enough
+// for our case (two Ranges built from the same TreeWalker pass are identical
+// iff they share these three). Avoids the cost of compareBoundaryPoints which
+// allocates internally.
+function rangesEqual(a: Range, b: Range): boolean {
+  return (
+    a.startContainer === b.startContainer
+    && a.startOffset === b.startOffset
+    && a.endContainer === b.endContainer
+    && a.endOffset === b.endOffset
+  );
 }

@@ -1851,11 +1851,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange, attachScroller } = useVirtuosoScroll();
 
   // ── In-page text finder (Cmd/Ctrl+F) ──
-  // Scope: already-rendered messages only (Virtuoso virtualizes the rest).
-  // Full history search lives in the global search engine on Launcher.
+  // Scope: the full message array — virtualized rows are counted from
+  // messages[] and reached via virtuoso.scrollToIndex on navigation.
+  // Full cross-session search still lives in the global search engine.
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
+  const chatSearchMessages = useMemo(
+    () => (streamingMessage ? [...historyMessages, streamingMessage] : historyMessages),
+    [historyMessages, streamingMessage],
+  );
   const chatSearch = useChatSearch({
     scrollerRef: scrollerRef as React.RefObject<HTMLElement | null>,
+    virtuosoRef,
+    messages: chatSearchMessages,
+    firstItemIndex,
     active: chatSearchOpen,
   });
   const chatSearchSetQueryRef = useRef(chatSearch.setQuery);
