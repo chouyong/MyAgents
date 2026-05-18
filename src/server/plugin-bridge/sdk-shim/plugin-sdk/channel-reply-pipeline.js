@@ -1,14 +1,24 @@
-// AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: npm run generate:sdk-shims
-// Source: openclaw/src/plugin-sdk/channel-reply-pipeline.ts
+// === AUTO-AUGMENT: drift-stubs from upstream openclaw — do not edit this block ===
+// Stubs for upstream openclaw exports the handwritten file below does not
+// implement. Regenerate via: npm run generate:sdk-shims
+export * from "./channel-reply-pipeline.auto.js";
+// === END AUTO-AUGMENT ===
 
-const _warned = new Set();
-function _w(fn) {
-  if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/channel-reply-pipeline.' + fn + '() not implemented in Bridge mode'); }
+// Handwritten Bridge-mode implementation for createChannelReplyPipeline.
+//
+// In Bridge mode, the actual reply path is owned by MyAgents:
+// compat-runtime.ts::channel.reply.dispatchReplyWithBufferedBlockDispatcher
+// POSTs the inbound message to Rust's /api/im-bridge/message instead of
+// invoking the plugin's `dispatcherOptions.deliver` callback. So whatever
+// fields `replyPipeline` would normally inject into dispatcherOptions are
+// ignored on this path. We only need the destructure to succeed.
+//
+// Yuanbao destructures `const { onModelSelected, ...replyPipeline } = ...`
+// at dispatch-reply.js and threads `onModelSelected` into replyOptions. We
+// supply a no-op so the call to it (if any) is harmless. `replyPipeline`
+// becomes {}.
+export function createChannelReplyPipeline() {
+  return {
+    onModelSelected: () => {},
+  };
 }
-
-export function resolveChannelSourceReplyDeliveryMode() { _w('resolveChannelSourceReplyDeliveryMode'); return undefined; }
-export function createChannelReplyPipeline() { _w('createChannelReplyPipeline'); return undefined; }
-export function createReplyPrefixContext() { _w('createReplyPrefixContext'); return undefined; }
-export function createReplyPrefixOptions() { _w('createReplyPrefixOptions'); return undefined; }
-export function createTypingCallbacks() { _w('createTypingCallbacks'); return undefined; }
