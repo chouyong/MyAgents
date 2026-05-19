@@ -13,12 +13,12 @@
   ;    Covers bun.exe (sidecar), node.exe (MCP via bundled npx), and any future binaries.
   ;    Uses ExecutablePath — the actual on-disk binary — so we won't false-positive
   ;    on processes that merely mention our path in their arguments.
-  nsExec::ExecToLog 'powershell -NoProfile -Command "$ErrorActionPreference=\"SilentlyContinue\"; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like \"$INSTDIR\*\" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"'
+  nsExec::ExecToLog 'powershell -NoProfile -Command "$$ErrorActionPreference=\"SilentlyContinue\"; Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -like \"$INSTDIR\*\" } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force }"'
 
   ; 2. Kill orphan SDK/MCP child processes that may use system node/bun
   ;    (their executable is NOT under $INSTDIR, but their CommandLine references .myagents)
-  nsExec::ExecToLog 'powershell -NoProfile -Command "$ErrorActionPreference=\"SilentlyContinue\"; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \"*claude-agent-sdk*\" -and $_.CommandLine -like \"*.myagents*\" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"'
-  nsExec::ExecToLog 'powershell -NoProfile -Command "$ErrorActionPreference=\"SilentlyContinue\"; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \"*.myagents\mcp\*\" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"'
+  nsExec::ExecToLog 'powershell -NoProfile -Command "$$ErrorActionPreference=\"SilentlyContinue\"; Get-CimInstance Win32_Process | Where-Object { $$_.CommandLine -like \"*claude-agent-sdk*\" -and $$_.CommandLine -like \"*.myagents*\" } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force }"'
+  nsExec::ExecToLog 'powershell -NoProfile -Command "$$ErrorActionPreference=\"SilentlyContinue\"; Get-CimInstance Win32_Process | Where-Object { $$_.CommandLine -like \"*.myagents\mcp\*\" } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force }"'
 
   ; Brief wait for processes to fully terminate and release file locks
   Sleep 1500

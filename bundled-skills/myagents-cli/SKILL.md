@@ -462,3 +462,44 @@ myagents agent channel remove <agentId> <channelId>
 ```
 
 不同平台需要不同凭证（flag 名必须与配置字段一致）。OpenClaw 社区插件（如飞书 `openclaw-lark`、微信）的 `--type` 是 `openclaw:<pluginId>`，并需要先 `plugin install` 装好对应插件。
+
+## Windows 构建排查补充
+
+当用户在 MyAgents 仓库里请求你帮助排查 Windows 本地打包、portable 包、updater 签名时，按下面规则处理：
+
+- 先区分三类产物：
+  - `*-setup.exe`：NSIS 安装包
+  - `*.nsis.zip`：Tauri updater 更新包
+  - `*portable.zip`：普通便携下载包
+- updater 验签只看 `*.nsis.zip` 和对应的 `*.nsis.zip.sig`
+- `portable.zip` 不参与当前 Tauri updater 签名链路
+
+portable 包不要只检查是否存在，至少要确认 ZIP 内包含：
+
+- `myagents.exe`
+- `server-dist.js`
+- `plugin-bridge-dist.mjs`
+- `nodejs/`
+- `cli/`
+- `mino/`
+- `bundled-skills/`
+- `claude-agent-sdk/`
+- `sharp-runtime/`
+- `tsx-runtime/`
+- `vcruntime140.dll`
+- `vcruntime140_1.dll`
+
+如果 portable ZIP 里只有 `myagents.exe` 和两个 VC++ DLL，说明它是残缺包，常见原因是错误地只从 `release/resources` 取文件。
+
+当前仓库的 `build_windows.ps1` 已修正为：
+
+- 从 `src-tauri\target\x86_64-pc-windows-msvc\release\` 根目录收集 portable 运行时物料
+- 排除 `.fingerprint`、`build`、`bundle`、`deps`、`incremental`、`myagents.pdb`、`portable` 等构建缓存
+- 在 portable 阶段打印：
+  - `便携版纳入 ZIP 的顶层条目: ...`
+
+当用户让你验证 Windows 构建是否正确时，优先给出这三类证据：
+
+1. `tauri build` 或 `build_windows.ps1` 的退出码是否为 `0`
+2. `bundle\nsis` 下 `.exe`、`.nsis.zip`、`.sig`、`portable.zip` 的时间和大小
+3. `portable.zip` 内关键顶层条目是否齐全

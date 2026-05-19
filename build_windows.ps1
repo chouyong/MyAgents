@@ -600,25 +600,30 @@ try {
             $portableDir = Join-Path $targetDir "portable"
             $zipName = "MyAgents_${Version}_x86_64-portable.zip"
             $zipPath = Join-Path $nsisDir $zipName
+            $portableExcludes = @(
+                ".cargo-lock",
+                ".fingerprint",
+                "build",
+                "bundle",
+                "deps",
+                "incremental",
+                "myagents.d",
+                "myagents.pdb",
+                "portable"
+            )
+            $portableEntries = Get-ChildItem -Path $targetDir -Force | Where-Object {
+                $portableExcludes -notcontains $_.Name
+            }
 
             if (Test-Path $portableDir) {
                 Remove-Item -Recurse -Force $portableDir
             }
             New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 
-            Copy-Item $exePath $portableDir -Force
-
-            # Copy VC++ Runtime DLLs for portable version (app-local deployment)
-            foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {
-                $dllSrc = Join-Path "src-tauri\resources" $dll
-                if (Test-Path $dllSrc) {
-                    Copy-Item $dllSrc $portableDir -Force
-                }
-            }
-
-            $resourcesSource = Join-Path $targetDir "resources"
-            if (Test-Path $resourcesSource) {
-                Copy-Item $resourcesSource $portableDir -Recurse -Force
+            # Portable package needs the full runtime layout from release/, not only the exe.
+            Write-Host "  便携版纳入 ZIP 的顶层条目: $($portableEntries.Name -join ', ')" -ForegroundColor DarkGray
+            $portableEntries | ForEach-Object {
+                Copy-Item $_.FullName $portableDir -Recurse -Force
             }
 
             if (Test-Path $zipPath) {
